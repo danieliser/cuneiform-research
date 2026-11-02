@@ -4,7 +4,7 @@ import io
 import json
 import re
 from typing import Any
-from .model import PARSER_VERSION, canonical, identity
+from .model import PARSER_VERSION, canonical, digest, identity
 
 RIGHTS = {
  'ebl': {'status':'unresolved-conflict','claims':['Zenodo 10018951: CC BY 4.0','JOHD paper: CC BY-NC-SA 4.0'], 'reuse':'not cleared; text/annotations/photos have distinct grants'},
@@ -17,6 +17,7 @@ class Builder:
     def __init__(self, db: Any, snapshot: str, namespace: str):
         self.db, self.snapshot, self.namespace = db, snapshot, namespace
         self.seen: set[str] = set()
+        self.raw_sha256 = ''
 
     def add(self, table: str, *values: object) -> None:
         self.db.execute(f'INSERT INTO {table} VALUES ({",".join("?" for _ in values)})', values)
@@ -34,6 +35,7 @@ class Builder:
         rid = identity('source',self.namespace,self.snapshot,key,locator)
         aid = identity('artifact',self.namespace,key)
         self.add('source_record',rid,self.namespace,key,locator,canonical(raw))
+        self.add('source_binding',rid,self.snapshot,self.raw_sha256)
         self.add('artifact',aid,rid,key,canonical(raw))
         return rid,aid
 
@@ -85,7 +87,7 @@ class Builder:
                 stripped=raw.strip('[]?#')
                 gap=stripped in {'x','X','...','…','(x)'}
                 simple=bool(re.fullmatch(r'[^\W\d][\w₀-₉]*',stripped))
-                kind='gap' if gap else ('derived_sign' if derived else ('reading' if simple else 'unsupported'))
+                kind='gap' if gap else (('derived_sign' if derived else 'reading') if simple else 'unsupported')
                 if blocked_line: kind='unsupported'
                 reading=None if kind in {'gap','unsupported'} else stripped
                 preservation='unknown' if derived else ('lost' if restored else ('damaged' if '#' in raw else 'unknown'))
@@ -96,7 +98,7 @@ class Builder:
                 if previous: self.edge('NEXT',previous,oid,record,extent='represented-position',boundary='same-line')
                 previous=oid
                 if kind=='unsupported': self.exclude(record,f'{field}:utf8:{start}:{end}','unsupported compound/segmentation; retained as blocking position')
-                if derived and not gap:
+                if kind=='derived_sign':
                     st=identity('sign',self.namespace,self.snapshot,stripped)
                     self.db.execute('INSERT INTO sign_type VALUES (?,?,?,?) ON CONFLICT DO NOTHING',[st,'ebl-export-signs',self.snapshot,stripped])
                     self.edge('MAPS_TO_SIGN',oid,st,record,rule='source supplied signs field; reading-derived, no image evidence',sign_list_revision='unknown',alignment_to_atf='unavailable')
@@ -122,6 +124,7 @@ def records(source: str, data: bytes) -> list[tuple[str,Any]]:
 def ingest(builder: Builder, source: str, data: bytes, record_id: str | None=None) -> None:
     if source=='oracc':
         raise ValueError('ORACC import unverified: inspect local JSON only; no invented field mapping')
+    builder.raw_sha256 = digest(data)
     for locator,row in records(source,data):
         try:
             # Validate before any mutation so rejection never leaves partial records.

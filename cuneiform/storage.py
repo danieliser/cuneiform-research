@@ -1,5 +1,5 @@
 """Immutable local snapshots; bounded acquisition; relocatable hash references."""
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import json
@@ -9,6 +9,7 @@ import urllib.request
 import uuid
 import duckdb
 from .adapters import Builder, RIGHTS, ingest, records
+from .projections import ProjectionConfig, REVISION, build as build_projections
 from .model import SCHEMA_VERSION, PARSER_VERSION, canonical, digest, identity
 
 MiB=1024**2
@@ -51,17 +52,30 @@ def inspect(source: str, path: Path, config: Config) -> dict:
 
 def verify(snapshot: Path, expected_sid: str | None=None) -> dict:
     manifest=json.loads((snapshot/'manifest.json').read_text())
-    if manifest.get('schema_version')!=SCHEMA_VERSION:
+    if manifest.get('schema_version') not in {'1',SCHEMA_VERSION}:
         raise ValueError('unsupported schema version; explicit migration required')
     required={'snapshot_id','parser_version','namespace','source','source_url','record_id','raw_sha256','source_bytes','rights','counts','files','manifest_sha256'}
     if not required <= manifest.keys(): raise ValueError('incomplete manifest')
     unsigned={k:v for k,v in manifest.items() if k!='manifest_sha256'}
     if digest(canonical(unsigned).encode())!=manifest['manifest_sha256']: raise ValueError('manifest integrity failure')
-    if manifest['parser_version']!=PARSER_VERSION: raise ValueError('unsupported parser version')
-    sid=identity('snapshot',manifest['namespace'],manifest['source'],manifest['raw_sha256'],SCHEMA_VERSION,PARSER_VERSION,manifest['record_id'],manifest['source_url'])
+    legacy=manifest['schema_version']=='1'
+    if manifest['parser_version']!=('conservative-2' if legacy else PARSER_VERSION): raise ValueError('unsupported parser version')
+    parts=[manifest['namespace'],manifest['source'],manifest['raw_sha256'],manifest['schema_version'],manifest['parser_version'],manifest['record_id'],manifest['source_url']]
+    projection_config=None
+    if not legacy:
+        spec=manifest.get('projection_spec')
+        if not isinstance(spec,dict) or spec.get('revision')!=REVISION: raise ValueError('unsupported projection revision')
+        projection_config=ProjectionConfig(**spec['config']); projection_config.validate()
+        parts.append(spec)
+    sid=identity('snapshot',*parts)
     if sid!=manifest['snapshot_id'] or (expected_sid is not None and sid!=expected_sid): raise ValueError('snapshot identity mismatch')
     import re
     tables=set(re.findall(r'CREATE TABLE (\w+)',Path(__file__).with_name('schema.sql').read_text()))
+    if legacy:
+        tables -= {'source_binding','projection_registry'}
+    else:
+        assert projection_config is not None
+        tables |= set(projection_assets(projection_config))
     required_files={'raw','graph.duckdb'} | {f'parquet/{t}.parquet' for t in tables}
     if set(manifest['files'])!=required_files or set(manifest['counts'])!=tables: raise ValueError('incomplete payload inventory')
     if manifest['files']['raw']!=manifest['raw_sha256']: raise ValueError('raw hash mismatch')
@@ -72,12 +86,14 @@ def verify(snapshot: Path, expected_sid: str | None=None) -> dict:
     return manifest
 
 
-def import_source(source: str, path: Path, config: Config, namespace: str | None=None, record_id: str | None=None, source_url: str | None=None, dry_run: bool=False) -> dict:
+def import_source(source: str, path: Path, config: Config, namespace: str | None=None, record_id: str | None=None, source_url: str | None=None, dry_run: bool=False, projections: ProjectionConfig=ProjectionConfig()) -> dict:
+    projections.validate()
+    projection_spec={'revision':REVISION,'config':asdict(projections)}
     data=read_bounded(path,config)
     info=inspect_bytes(source,data)
     namespace=namespace or source
     # Record the explicit source citation in identity: a different attribution must not silently reuse a manifest.
-    sid=identity('snapshot',namespace,source,digest(data),SCHEMA_VERSION,PARSER_VERSION,record_id,source_url)
+    sid=identity('snapshot',namespace,source,digest(data),SCHEMA_VERSION,PARSER_VERSION,record_id,source_url,projection_spec)
     dest=config.root/'snapshots'/sid
     if dest.exists(): return {'snapshot':sid,'reused':True,'manifest':verify(dest,sid)}
     if dry_run:
@@ -100,6 +116,7 @@ def import_source(source: str, path: Path, config: Config, namespace: str | None
             db.execute(Path(__file__).with_name('schema.sql').read_text())
             ingest(Builder(db,sid,namespace),source,data,record_id)
             validate_graph(db)
+            build_projections(db,projections)
             counts={}
             for (table,) in db.execute("SELECT table_name FROM information_schema.tables WHERE table_type='BASE TABLE'").fetchall():
                 row=db.execute(f'SELECT count(*) FROM {table}').fetchone()
@@ -111,7 +128,7 @@ def import_source(source: str, path: Path, config: Config, namespace: str | None
                 db.execute(f"COPY {table} TO '{target}' (FORMAT PARQUET)")
         finally: db.close()
         files={str(p.relative_to(stage)):digest(p.read_bytes()) for p in stage.rglob('*') if p.is_file()}
-        manifest={'snapshot_id':sid,'schema_version':SCHEMA_VERSION,'parser_version':PARSER_VERSION,'namespace':namespace,'source':source,'source_url':source_url,'record_id':record_id,'retrieved_or_imported_at':datetime.now(timezone.utc).isoformat(),'raw_sha256':digest(data),'source_bytes':len(data),'rights':RIGHTS[source],'files':files,'counts':counts,'source_locator_contract':'JSON pointer or CSV logical row; token offsets UTF-8 bytes in decoded source field','coverage':'conservative subset; unsupported positions retained; no linguistic validation','storage_paths':'relative to snapshot directory'}
+        manifest={'projection_spec':projection_spec,'snapshot_id':sid,'schema_version':SCHEMA_VERSION,'parser_version':PARSER_VERSION,'namespace':namespace,'source':source,'source_url':source_url,'record_id':record_id,'retrieved_or_imported_at':datetime.now(timezone.utc).isoformat(),'raw_sha256':digest(data),'source_bytes':len(data),'rights':RIGHTS[source],'files':files,'counts':counts,'source_locator_contract':'JSON pointer or CSV logical row; token offsets UTF-8 bytes in decoded source field','coverage':'conservative subset; unsupported positions retained; no linguistic validation','storage_paths':'relative to snapshot directory'}
         manifest['manifest_sha256']=digest(canonical(manifest).encode())
         (stage/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n')
         config.guard(0)
@@ -172,3 +189,7 @@ def resolve_snapshot(config: Config, sid: str) -> Path:
     result=config.root/'snapshots'/sid
     verify(result,sid)
     return result
+
+
+def projection_assets(config):
+    return (['posting'] if config.postings else []) + (['ngram'] if config.ngrams else [])

@@ -4,8 +4,8 @@ from enum import StrEnum
 import hashlib
 import json
 
-SCHEMA_VERSION = '1'
-PARSER_VERSION = 'conservative-2'
+SCHEMA_VERSION = '2'
+PARSER_VERSION = 'conservative-3'
 
 class NodeKind(StrEnum):
     ARTIFACT = 'Artifact'

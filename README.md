@@ -2,7 +2,7 @@
 
 A runnable local Python/DuckDB foundation for the authoritative [SPEC-v0.2](SPEC-v0.2.md). It preserves source readings, uncertainty and provenance while exposing typed graph edges and gap-safe motifs. This is a narrow implementation, not the full research workbench.
 
-**Current delivery:** local graph and conservative eBL/CDLI adapters exercised on fixtures and small actual samples. Parent review fixes are applied; all 19 tests pass, including guarded disk-backed fixture import, idempotence, relocation, Parquet readback and tamper rejection. ORACC remains inspection-only. No bulk corpus, remote service, UI, MCP, images or models. See CHECKPOINT.md for historical limitations and the latest validation addendum.
+**Current delivery:** linked sequence positions, source-span lookup, indexed reading/sign postings, bounded n-grams, graph traversal, ambiguous catalog aliases and translation-context lookup. Schema 2 / conservative-3 / linked-1 are exercised in memory on synthetic and already-retained eBL/CDLI samples. See [representation map and runnable recipes](docs/REPRESENTATION-MAP.md). Historical schema-1 disk checks passed; new schema-2 persistent/Parquet behavior remains unverified because the 3 GiB reserve is blocked. ORACC, word/lemma alignment, services, UI, images and models remain unavailable.
 
 ## Run now without corpus writes
 
@@ -11,21 +11,21 @@ Python 3.11+ and `duckdb==1.4.3` are the only runtime requirements. This machine
 ```sh
 cd /Users/danieliser/Projects/Fun/cuneiform-research
 PY=/Users/danieliser/.local/share/cuneiform-research/venv/bin/python
-$PY -m cuneiform demo ebl fixtures/ebl-synthetic.json A B C
-$PY -m cuneiform demo ebl fixtures/ebl-synthetic.json A '?' C
-$PY -m cuneiform demo cdli fixtures/cdli-synthetic.csv A B
-$PY -m unittest discover -s tests -v
+$PY -B -m cuneiform demo ebl fixtures/ebl-synthetic.json A B C
+$PY -B -m cuneiform demo ebl fixtures/ebl-synthetic.json A '?' C
+$PY -B -m cuneiform demo cdli fixtures/cdli-synthetic.csv A B
+$PY -B -m unittest discover -s tests -v
 ```
 
-Expected synthetic graph/array counts: `A B C` = **6**, `A ? C` = **11**, `A C` = **0**. `?` explicitly permits one represented position, including a gap/unsupported position. Demo output includes counts, graph matches and an exact raw-source trace. Runtime remains in memory and DuckDB disk spill is disabled. The test suite includes a gated disk test that skips by default; the actual-source test skips on machines without the private local evidence files.
+Expected synthetic graph/array counts: `A B C` = **6**, `A ? C` = **11**, `A C` = **0**. `?` explicitly permits one represented position, including a gap/unsupported position. Demo output includes sequence/index/graph count parity, projection coverage, graph matches and an exact raw-source trace. Runtime remains in memory and DuckDB disk spill is disabled. The test suite includes a gated disk test that skips by default; the actual-source test skips on machines without the private local evidence files.
 
 The real frozen README example can also be exercised without disk ingestion:
 
 ```sh
 EVIDENCE=/Users/danieliser/.local/share/cuneiform-research/evidence
-$PY -m cuneiform demo ebl "$EVIDENCE/ebl-frozen-example.json" ABZ215 ABZ13 --field signs
-$PY -m cuneiform demo ebl "$EVIDENCE/ebl-one" A B
-$PY -m cuneiform demo cdli "$EVIDENCE/cdli-three.csv" A B
+$PY -B -m cuneiform demo ebl "$EVIDENCE/ebl-frozen-example.json" ABZ215 ABZ13 --field signs
+$PY -B -m cuneiform demo ebl "$EVIDENCE/ebl-one" A B
+$PY -B -m cuneiform demo cdli "$EVIDENCE/cdli-three.csv" A B
 ```
 
 These are small privately retained inspection samples, not a downloaded corpus. Full receipts include URLs, hashes, byte counts and failures in `evidence/source-receipts.json`. No real corpus text is packaged in repository fixtures.
@@ -38,20 +38,20 @@ On a future machine with sufficient approved space, install into an external vir
 
 ```sh
 # Read-only inspection and dry-run report work even when admission is blocked.
-$PY -m cuneiform inspect ebl fixtures/ebl-synthetic.json
-$PY -m cuneiform import ebl fixtures/ebl-synthetic.json --dry-run --source-url synthetic:fixture
+$PY -B -m cuneiform inspect ebl fixtures/ebl-synthetic.json
+$PY -B -m cuneiform import ebl fixtures/ebl-synthetic.json --dry-run --source-url synthetic:fixture
 
 # Run only after reserve is restored. Import will still enforce it.
-$PY -m cuneiform import ebl fixtures/ebl-synthetic.json --source-url synthetic:fixture
+$PY -B -m cuneiform import ebl fixtures/ebl-synthetic.json --source-url synthetic:fixture
 # Set SNAP to the snapshot ID printed by that command.
-$PY -m cuneiform manifest "$SNAP"
-$PY -m cuneiform query "$SNAP" A B C
-$PY -m cuneiform query "$SNAP" A '?' C
-$PY -m cuneiform query "$SNAP" A B C --max-skip 2
-$PY -m cuneiform query "$SNAP" A B C --strict
+$PY -B -m cuneiform manifest "$SNAP"
+$PY -B -m cuneiform query "$SNAP" A B C
+$PY -B -m cuneiform query "$SNAP" A '?' C
+$PY -B -m cuneiform query "$SNAP" A B C --max-skip 2
+$PY -B -m cuneiform query "$SNAP" A B C --strict
 # Set OCC to an occurrence ID returned in a match.
-$PY -m cuneiform trace "$SNAP" "$OCC"
-CUNEIFORM_RUN_DISK_TESTS=1 $PY -m unittest discover -s tests -v
+$PY -B -m cuneiform trace "$SNAP" "$OCC"
+CUNEIFORM_RUN_DISK_TESTS=1 $PY -B -m unittest discover -s tests -v
 ```
 
 `--max-skip 2` means `A B [0–2 represented positions] C`, not 0–2 reconstructed ancient signs. Unknown-length losses remain one unknown-extent represented position. Exact patterns cannot jump them. All queries are line-local and select one explicit snapshot plus sequence field; ATF and derived-sign sequences are never mixed. Match IDs deduplicate identical spans. Counts report witness/artifact support and represented-position denominators; composition coverage is unknown. The returned match list is capped at 100, with a truncation flag; counts still cover the bounded input.
@@ -61,10 +61,10 @@ CUNEIFORM_RUN_DISK_TESTS=1 $PY -m unittest discover -s tests -v
 Other commands:
 
 ```sh
-$PY -m cuneiform inspect oracc /path/to/small-local-project-record.json
-$PY -m cuneiform import ebl-atf /path/to/local.atf --record-id SOURCE-ID --namespace source-edition
+$PY -B -m cuneiform inspect oracc /path/to/small-local-project-record.json
+$PY -B -m cuneiform import ebl-atf /path/to/local.atf --record-id SOURCE-ID --namespace source-edition
 # Download is opt-in, bounded and reserve-gated; not needed for existing demos.
-$PY -m cuneiform fetch 'https://www.ebl.lmu.de/api/fragments/K.1' --allowlist fixtures/allowlist.json --max-bytes 32768
+$PY -B -m cuneiform fetch 'https://www.ebl.lmu.de/api/fragments/K.1' --allowlist fixtures/allowlist.json --max-bytes 32768
 ```
 
 Import byte cap is 2 MiB. Defaults enforce a 500 MiB root budget and 3 GiB free reserve. Existing dependencies/data under that root count toward the budget. Downloads require exact HTTPS allowlisting, reject redirects and do not retry. Persistent import uses new staging directories and validates existing snapshots before reuse. Whole-file malformed JSON/CSV aborts before a snapshot; per-record mapping rejections are stored in `rejection` alongside raw values. No automatic destructive cleanup or migrations.

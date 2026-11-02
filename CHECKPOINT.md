@@ -106,3 +106,47 @@ Supersedes the earlier disk-verification limitation: available space recovered a
 Fixed all four review findings: lines containing unsupported removal/gloss span delimiters conservatively block every token; extent-qualified translations are retained with unresolved alignment and unsupported translation syntax is accounted; manifest verification requires all typed payloads, binds identity and parser/schema, checks raw length/hash and metadata digest; input is read once with a cap+1 bounded read for inspection, hash and import. Parser revision is conservative-2. Manifest digest detects inconsistent changes, not authenticated malicious coordinated rewrites; independent trusted receipts remain necessary for authenticity. Snapshot verification accepts relocation but import reuse and ID resolution enforce the requested snapshot ID.
 
 Regression tests cover each review finding. Disk tests additionally verified import/reuse, changed bytes, relocation, Parquet and tamper rejection. An initial relocation mismatch exposed a path-dependent check, corrected by passing expected snapshot identity separately; a tamper error-label mismatch was corrected. Final suite green. This remains a narrow structural prototype: ORACC mappings, full ATF grammar, 30-record audit, lemma layer population, MCP and complete SPEC remain unfinished. Images/bulk ingestion stay deferred; long-term storage undecided.
+
+## Linked projection slice — implementation handoff (2026-11-02)
+
+Implemented locally from clean `3ead790de75a61140cd254edcf67fed1c02ccac8`, sole writer, no subagents. Parent independent review remains pending. Frozen specs/reviews are unchanged. No remote/publish, downloads, dependency installs, corpus writes, images, embeddings, UI or service work occurred.
+
+Delivered schema **2**, parser **conservative-3**, projection **linked-1**:
+
+- Canonical source binding stores snapshot/raw hash; ordered-position/source-span views retain exact source locators, line boundaries, gaps and unsupported positions.
+- Indexed postings by scoped reading or source-derived sign ID; optional configured 2–5-gram windows with stable graph-compatible match span IDs, occurrence lists and source/witness/artifact links. Separate source/strict policies; no Cartesian alternatives or rewiring across exclusions.
+- Executable typed node/edge views, reversible provenance/claim/translation-placement links, exact catalog-key candidate lookup preserving competing alias claims, translation text/context lookup and missing-layer coverage.
+- Registry with configuration/revision/source/canonical hashes, stale detection and atomic bounded rebuild. Defaults cap 20,000 positions / 100,000 derived rows; budget failures leave the existing projection intact. Frozen persistent database rebuilds are refused; new imports bind projection configuration into a new snapshot ID.
+- Variable manifest inventories retain all mandatory canonical assets and include only configured derived tables. Generic persistent export includes every materialized table. Legacy schema-1/conservative-2 verification retains the original inventory contract, with no rewriting.
+- `explore` CLI supports report, postings, motifs, sequence, occurrence, reverse-postings, reverse-motifs, aliases, catalog, translations, nodes, neighbors and source span. [Representation map](docs/REPRESENTATION-MAP.md) supplies CLI/API recipes and the portable graph export contract.
+
+Parser change: unsupported strings in exported `signs` now block matching and no longer create a SignType/MAPS_TO_SIGN assertion. They previously passed through the derived-sign shortcut (e.g. `B/C`). Real exported sign identifiers remain source-derived, not visual evidence. All four prior review regressions remain green. Full source grammar and compatible alternatives remain unsupported.
+
+Executed with existing `/Users/danieliser/.local/share/cuneiform-research/venv/bin/python -B`, in-memory DuckDB with disk spill disabled:
+
+```
+CUNEIFORM_RUN_DISK_TESTS=0 .../python -B -m unittest discover -s tests -v
+Ran 28 tests in 10.103s
+OK (skipped=1)
+```
+
+**27 passed, 1 disk integration test deliberately skipped.** Includes old fixture/review tests and nine projection tests: independent hand counts, overlapping motifs, unknown-length losses, unsupported alternatives, strict exclusions, namespace/field separation, source-span trace roundtrip, graph/array/index parity, duplicate aliases and exact cross-source lookup, unresolved translation coverage, bounded paging, stale rejection, deterministic rebuild, atomic budget refusal, optional assets and mocked schema-1/schema-2 manifest inventories. The actual retained eBL test ran (not skipped). Mocked payload verification is not disk/Parquet evidence.
+
+Actual source exercises using only already-retained files:
+
+| Input | Index / array / graph motif count | Postings / n-gram rows | Coverage |
+|---|---|---|---|
+| Synthetic eBL `A B C` | 6 / 6 / 6 | 35 / 47 | 1 unresolved translation; 0 supplied words/lemmas |
+| Frozen eBL example `ABZ215 ABZ13`, signs | 3 / 3 / 3 | 375 / 1,824 | 9 unresolved translations; 0 supplied words/lemmas |
+| Retained live eBL K.1 metadata, `A B` | 0 / 0 / 0 | 0 / 0 | no supplied sequences or translations |
+| Retained three CDLI rows, `A B` | 0 / 0 / 0 | 0 / 0 | three artifacts, no supplied text layers |
+
+CLI subprocess smoke: `explore ... motifs '["A","?","C"]' --limit 2` returned 2 rows, total 11, truncated=true; combined fixture alias lookup returned two separate claims; translation substring lookup returned one unresolved string. Existing graph matches and new indexed matches share span IDs. Twelve A postings matched both canonical positions and graph HAS_OCCURRENCE endpoints. Separate overlapping `A A A A` fixture yielded three `A A` matches. No linguistic accuracy is implied by count parity.
+
+First new suite run caught a reserved SQL alias (`sequences`) in coverage; quoted the alias and reran successfully. Python-work/Pyright diagnostics: `projections.py` 0 diagnostics; `storage.py` initially reported a possibly-unbound branch variable, then 0 after explicit initialization/assertion. These are file-specific diagnostics, not a project-wide typecheck claim.
+
+Disk evidence: start available **1,774,836 KiB**, later **1,762,320 KiB** (~1.68 GiB), below the 3 GiB reserve. Import dry-run returned exactly `free-space reserve would be violated`. Runtime footprint **50,992 KiB**; repository before final checkpoint/commit **760 KiB**, including Git. Added code/docs/tests remain well below 10 MiB and task-owned total below 500 MiB. No cleanup or new volume was used.
+
+**Unverified new disk behavior:** schema-2 import, optional projection Parquet export/readback, persistent snapshot reuse/relocation and frozen-database rebuild refusal. Historical schema-1 parent disk success is preserved above, not extended to these changes. Portable graph export is a contract over executable views; no FalkorDB service or live FalkorDB validation occurred. ORACC, word/lemma/sense population, translation alignment, image evidence, alternative-aware bounds and the full SPEC remain future work. Source rights remain unresolved as previously documented.
+
+Final report smoke passed after bounding summary coverage to 20 rows with a truncation flag. Frozen specifications and every review file were compared byte-for-byte against baseline Git contents and matched. `git diff --check` passed. `gitleaks dir . --redact --no-banner` scanned approximately 316 KB with **no leaks found**, retaining only the existing narrow frozen-spec false-positive exception. Local commit only; no remote action.

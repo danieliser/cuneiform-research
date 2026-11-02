@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 from test_foundation import build
 from cuneiform.query import motif
+from cuneiform.model import SCHEMA_VERSION
 from cuneiform.storage import Config, import_source, read_bounded, verify
 
 class ReviewRegressions(unittest.TestCase):
@@ -24,7 +25,7 @@ class ReviewRegressions(unittest.TestCase):
         finally: db.close()
 
     def test_incomplete_manifest_rejected(self):
-        with patch.object(Path,'read_text',return_value='{"schema_version":"1","files":{}}'):
+        with patch.object(Path,'read_text',return_value=json.dumps({'schema_version':SCHEMA_VERSION,'files':{}})):
             with self.assertRaisesRegex(ValueError,'incomplete manifest'): verify(Path('/nonexistent'))
 
     def test_input_bounded_and_single_read(self):

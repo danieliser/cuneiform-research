@@ -2,7 +2,8 @@
 from pathlib import Path
 import duckdb
 from .adapters import Builder, RIGHTS, ingest
-from .model import digest, identity
+from .model import digest, identity, canonical
+from .projections import build, lookup, report
 from .query import motif, array_count, trace_rows
 from .storage import Config, inspect_bytes, read_bounded, validate_graph
 
@@ -18,11 +19,13 @@ def run(source: str, path: Path, config: Config, pattern: list[str], field: str=
         db.execute(Path(__file__).with_name('schema.sql').read_text())
         ingest(Builder(db,identity('demo',source,digest(raw)),source),source,raw)
         validate_graph(db)
+        projection=build(db)
+        indexed=lookup(db,'motifs',canonical(pattern),namespace=source,snapshot=identity('demo',source,digest(raw)),field=field)
         result=motif(db,pattern,field)
         array=array_count(db,pattern,field)
-        if array!=result['occurrences']: raise ValueError('array/graph parity failed')
+        if array!=result['occurrences'] or indexed['count']!=array: raise ValueError('array/graph parity failed')
         counts={t:db.execute(f'SELECT count(*) FROM {t}').fetchone()[0] for t in ['source_record','artifact','witness','sequence_version','line','occurrence','sign_type','word_token','lemma','sense','translation_segment','claim','rejection','exclusion','edge']}
         occurrence=db.execute('SELECT id FROM occurrence ORDER BY id LIMIT 1').fetchone()
         trace=trace_rows(db,raw,{'source':source,'raw_sha256':digest(raw),'rights':RIGHTS[source]},occurrence[0]) if occurrence else None
-        return {'mode':'in-memory; no snapshot or Parquet written','source_inspection':info,'counts':counts,'query':result,'array_count':array,'example_trace':trace}
+        return {'projections':projection,'projection_report':report(db),'indexed_count':indexed['count'],'mode':'in-memory; no snapshot or Parquet written','source_inspection':info,'counts':counts,'query':result,'array_count':array,'example_trace':trace}
     finally: db.close()
