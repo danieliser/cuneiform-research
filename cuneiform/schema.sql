@@ -1,5 +1,5 @@
 CREATE TABLE registry(version VARCHAR PRIMARY KEY, parser_version VARCHAR NOT NULL);
-INSERT INTO registry VALUES ('1', 'conservative-1');
+INSERT INTO registry VALUES ('1', 'conservative-2');
 CREATE TABLE source_record(id VARCHAR PRIMARY KEY, namespace VARCHAR NOT NULL, source_key VARCHAR NOT NULL, locator VARCHAR NOT NULL, raw_json JSON NOT NULL);
 CREATE TABLE artifact(id VARCHAR PRIMARY KEY, source_record_id VARCHAR NOT NULL REFERENCES source_record(id), catalog_key VARCHAR NOT NULL, metadata JSON NOT NULL);
 CREATE TABLE witness(id VARCHAR PRIMARY KEY, source_record_id VARCHAR NOT NULL REFERENCES source_record(id), artifact_id VARCHAR NOT NULL REFERENCES artifact(id), scope VARCHAR NOT NULL);

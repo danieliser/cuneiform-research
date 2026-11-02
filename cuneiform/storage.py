@@ -31,18 +31,41 @@ class Config:
         if shutil.disk_usage(ancestor).free-additional<self.reserve_bytes: raise ValueError('free-space reserve would be violated')
 
 
-def inspect(source: str, path: Path, config: Config) -> dict:
-    size=path.stat().st_size
-    if size>config.max_input_bytes: raise ValueError('input exceeds bounded local import cap')
-    data=path.read_bytes()
+def read_bounded(path: Path, config: Config) -> bytes:
+    with path.open('rb') as handle:
+        data = handle.read(config.max_input_bytes + 1)
+    if len(data) > config.max_input_bytes:
+        raise ValueError('input exceeds bounded local import cap')
+    return data
+
+
+def inspect_bytes(source: str, data: bytes) -> dict:
+    size=len(data)
     rows=records(source,data)
     return {'bytes':size,'sha256':digest(data),'records':len(rows),'first_keys':list(rows[0][1]) if rows and isinstance(rows[0][1],dict) else [],'source':source,'import_status':'experimental-inspection-only' if source=='oracc' else 'supported-conservative-subset','estimated_additional_bytes':size*100+8*MiB,'rights':RIGHTS[source]}
 
 
-def verify(snapshot: Path) -> dict:
+def inspect(source: str, path: Path, config: Config) -> dict:
+    return inspect_bytes(source, read_bounded(path, config))
+
+
+def verify(snapshot: Path, expected_sid: str | None=None) -> dict:
     manifest=json.loads((snapshot/'manifest.json').read_text())
     if manifest.get('schema_version')!=SCHEMA_VERSION:
         raise ValueError('unsupported schema version; explicit migration required')
+    required={'snapshot_id','parser_version','namespace','source','source_url','record_id','raw_sha256','source_bytes','rights','counts','files','manifest_sha256'}
+    if not required <= manifest.keys(): raise ValueError('incomplete manifest')
+    unsigned={k:v for k,v in manifest.items() if k!='manifest_sha256'}
+    if digest(canonical(unsigned).encode())!=manifest['manifest_sha256']: raise ValueError('manifest integrity failure')
+    if manifest['parser_version']!=PARSER_VERSION: raise ValueError('unsupported parser version')
+    sid=identity('snapshot',manifest['namespace'],manifest['source'],manifest['raw_sha256'],SCHEMA_VERSION,PARSER_VERSION,manifest['record_id'],manifest['source_url'])
+    if sid!=manifest['snapshot_id'] or (expected_sid is not None and sid!=expected_sid): raise ValueError('snapshot identity mismatch')
+    import re
+    tables=set(re.findall(r'CREATE TABLE (\w+)',Path(__file__).with_name('schema.sql').read_text()))
+    required_files={'raw','graph.duckdb'} | {f'parquet/{t}.parquet' for t in tables}
+    if set(manifest['files'])!=required_files or set(manifest['counts'])!=tables: raise ValueError('incomplete payload inventory')
+    if manifest['files']['raw']!=manifest['raw_sha256']: raise ValueError('raw hash mismatch')
+    if (snapshot/'raw').stat().st_size!=manifest['source_bytes']: raise ValueError('snapshot integrity failure: raw size mismatch')
     for name,expected in manifest['files'].items():
         if Path(name).is_absolute() or '..' in Path(name).parts: raise ValueError('unsafe manifest path')
         if digest((snapshot/name).read_bytes())!=expected: raise ValueError('snapshot integrity failure: '+name)
@@ -50,13 +73,13 @@ def verify(snapshot: Path) -> dict:
 
 
 def import_source(source: str, path: Path, config: Config, namespace: str | None=None, record_id: str | None=None, source_url: str | None=None, dry_run: bool=False) -> dict:
-    info=inspect(source,path,config)
+    data=read_bounded(path,config)
+    info=inspect_bytes(source,data)
     namespace=namespace or source
-    data=path.read_bytes()
     # Record the explicit source citation in identity: a different attribution must not silently reuse a manifest.
     sid=identity('snapshot',namespace,source,digest(data),SCHEMA_VERSION,PARSER_VERSION,record_id,source_url)
     dest=config.root/'snapshots'/sid
-    if dest.exists(): return {'snapshot':sid,'reused':True,'manifest':verify(dest)}
+    if dest.exists(): return {'snapshot':sid,'reused':True,'manifest':verify(dest,sid)}
     if dry_run:
         try:
             config.guard(info['estimated_additional_bytes']); admission='allowed'
@@ -88,7 +111,8 @@ def import_source(source: str, path: Path, config: Config, namespace: str | None
                 db.execute(f"COPY {table} TO '{target}' (FORMAT PARQUET)")
         finally: db.close()
         files={str(p.relative_to(stage)):digest(p.read_bytes()) for p in stage.rglob('*') if p.is_file()}
-        manifest={'snapshot_id':sid,'schema_version':SCHEMA_VERSION,'parser_version':PARSER_VERSION,'namespace':namespace,'source':source,'source_url':source_url,'retrieved_or_imported_at':datetime.now(timezone.utc).isoformat(),'raw_sha256':digest(data),'source_bytes':len(data),'rights':RIGHTS[source],'files':files,'counts':counts,'source_locator_contract':'JSON pointer or CSV logical row; token offsets UTF-8 bytes in decoded source field','coverage':'conservative subset; unsupported positions retained; no linguistic validation','storage_paths':'relative to snapshot directory'}
+        manifest={'snapshot_id':sid,'schema_version':SCHEMA_VERSION,'parser_version':PARSER_VERSION,'namespace':namespace,'source':source,'source_url':source_url,'record_id':record_id,'retrieved_or_imported_at':datetime.now(timezone.utc).isoformat(),'raw_sha256':digest(data),'source_bytes':len(data),'rights':RIGHTS[source],'files':files,'counts':counts,'source_locator_contract':'JSON pointer or CSV logical row; token offsets UTF-8 bytes in decoded source field','coverage':'conservative subset; unsupported positions retained; no linguistic validation','storage_paths':'relative to snapshot directory'}
+        manifest['manifest_sha256']=digest(canonical(manifest).encode())
         (stage/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n')
         config.guard(0)
         # A same-ID concurrent writer must not replace an existing directory.
@@ -146,5 +170,5 @@ def resolve_snapshot(config: Config, sid: str) -> Path:
     if not sid.startswith('snapshot:') or any(c not in '0123456789abcdef' for c in sid[9:]) or len(sid)!=41:
         raise ValueError('invalid snapshot ID')
     result=config.root/'snapshots'/sid
-    verify(result)
+    verify(result,sid)
     return result

@@ -4,12 +4,12 @@ import duckdb
 from .adapters import Builder, RIGHTS, ingest
 from .model import digest, identity
 from .query import motif, array_count, trace_rows
-from .storage import Config, inspect, validate_graph
+from .storage import Config, inspect_bytes, read_bounded, validate_graph
 
 
 def run(source: str, path: Path, config: Config, pattern: list[str], field: str='atf') -> dict:
-    info=inspect(source,path,config)
-    raw=path.read_bytes()
+    raw=read_bounded(path,config)
+    info=inspect_bytes(source,raw)
     db=duckdb.connect(':memory:')
     try:
         db.execute("SET memory_limit='128MB'")

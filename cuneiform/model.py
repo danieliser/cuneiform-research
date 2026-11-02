@@ -5,7 +5,7 @@ import hashlib
 import json
 
 SCHEMA_VERSION = '1'
-PARSER_VERSION = 'conservative-1'
+PARSER_VERSION = 'conservative-2'
 
 class NodeKind(StrEnum):
     ARTIFACT = 'Artifact'

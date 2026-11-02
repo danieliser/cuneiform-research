@@ -97,3 +97,12 @@ No automatic continuation is promised after handoff. Parent can review files and
 ## Local repository and secret scan
 
 Initialized Git only inside `cuneiform-research`, with no remote. Initial Gitleaks scan found one false positive at frozen `SPEC-v0.1.md:56`: ordinary editorial-notation prose. Inspected the line; preserved the predecessor and recorded only that exact rule/path/line fingerprint in `.gitleaksignore`. The final scan passed after that narrow exception (zero remaining findings). No broad scanner suppression or external publication is involved.
+
+
+## Parent review fixes and validation (2026-11-02)
+
+Supersedes the earlier disk-verification limitation: available space recovered above the reserve, and parent admitted the small fixture integration run under the original 500 MiB cap. All 19 tests passed with CUNEIFORM_RUN_DISK_TESTS=1 (4.936s); no bulk downloads. The test removes only its own fixture workspace.
+
+Fixed all four review findings: lines containing unsupported removal/gloss span delimiters conservatively block every token; extent-qualified translations are retained with unresolved alignment and unsupported translation syntax is accounted; manifest verification requires all typed payloads, binds identity and parser/schema, checks raw length/hash and metadata digest; input is read once with a cap+1 bounded read for inspection, hash and import. Parser revision is conservative-2. Manifest digest detects inconsistent changes, not authenticated malicious coordinated rewrites; independent trusted receipts remain necessary for authenticity. Snapshot verification accepts relocation but import reuse and ID resolution enforce the requested snapshot ID.
+
+Regression tests cover each review finding. Disk tests additionally verified import/reuse, changed bytes, relocation, Parquet and tamper rejection. An initial relocation mismatch exposed a path-dependent check, corrected by passing expected snapshot identity separately; a tamper error-label mismatch was corrected. Final suite green. This remains a narrow structural prototype: ORACC mappings, full ATF grammar, 30-record audit, lemma layer population, MCP and complete SPEC remain unfinished. Images/bulk ingestion stay deferred; long-term storage undecided.

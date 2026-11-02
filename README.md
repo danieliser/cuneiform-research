@@ -2,7 +2,7 @@
 
 A runnable local Python/DuckDB foundation for the authoritative [SPEC-v0.2](SPEC-v0.2.md). It preserves source readings, uncertainty and provenance while exposing typed graph edges and gap-safe motifs. This is a narrow implementation, not the full research workbench.
 
-**Current delivery:** in-memory graph, adapters, counts and source traces have run against synthetic fixtures and small actual eBL/CDLI samples. Persistent snapshot/Parquet code is implemented but **disk-backed verification was blocked** when unrelated disk consumption reduced available space below the required 3 GiB reserve; it remains unrun under the parent’s final 10 MiB write allowance. ORACC is inspection-only, with import explicitly disabled pending source verification. No remote, service, UI, MCP, images or models.
+**Current delivery:** local graph and conservative eBL/CDLI adapters exercised on fixtures and small actual samples. Parent review fixes are applied; all 19 tests pass, including guarded disk-backed fixture import, idempotence, relocation, Parquet readback and tamper rejection. ORACC remains inspection-only. No bulk corpus, remote service, UI, MCP, images or models. See CHECKPOINT.md for historical limitations and the latest validation addendum.
 
 ## Run now without corpus writes
 
@@ -32,7 +32,7 @@ These are small privately retained inspection samples, not a downloaded corpus. 
 
 ## Persistent commands after storage admission
 
-Default root: `~/.local/share/cuneiform-research`. Override with `CUNEIFORM_STORAGE_ROOT` or global `--root /approved/external/path`. Keep runtime data outside Projects. Long-term storage is undecided; no new volume is assumed. No further install/download is authorized while the reserve is blocked.
+Default root: `~/.local/share/cuneiform-research`. Override with `CUNEIFORM_STORAGE_ROOT` or global `--root /approved/external/path`. Keep runtime data outside Projects. Long-term storage is undecided; no new volume is assumed. Bulk ingestion remains deferred; every write admission still enforces the reserve.
 
 On a future machine with sufficient approved space, install into an external virtual environment with `python3 -m venv "$ROOT/venv"` and `"$ROOT/venv/bin/pip" install --no-cache-dir duckdb==1.4.3`. This session's installed environment used roughly 50 MiB, far below the 500 MiB task cap.
 

@@ -59,11 +59,13 @@ class Builder:
             if line.startswith('@column '): column=line[8:]
             elif line.startswith('@'): surface=line[1:]; column=None
             if line.startswith('#tr.'):
-                tm=re.match(r'#tr\.([a-z-]+):\s*(.*)',line)
+                tm=re.match(r'#tr\.([a-z-]+)(?:\.\([^)]*\))?:\s*(.*)',line)
                 if tm:
                     # The README demonstrates translations spanning preceding multiple lines.
                     # Preserve placement; do not falsely assert single-line alignment.
                     self.add('translation_segment',identity('translation',sid,source_line_no),record,sid,tm[1],tm[2],None,'unresolved-span',f'{field}:utf8:{offset}:{offset+len(line.encode())}')
+                else:
+                    self.exclude(record,f'{field}:line:{source_line_no}','unsupported translation syntax retained in raw')
             if not derived and not match:
                 if line and not line.startswith('#tr.'):
                     self.exclude(record,f'{field}:line:{source_line_no}','non-token ATF line retained in raw; no cross-line matching')
@@ -75,6 +77,7 @@ class Builder:
             self.edge('HAS_LINE',sid,lid,record)
             if previous_line: self.edge('NEXT_LINE',previous_line,lid,record,continuity='not-implied')
             previous_line=lid; ordinal+=1; previous=None; bracket_depth=0
+            blocked_line=not derived and any(marker in body for marker in ('<<','>>','{(',')}'))
             for position,m in enumerate(re.finditer(r'\S+',body)):
                 raw=m[0]; start=offset+len(line[:begin+m.start()].encode()); end=start+len(raw.encode())
                 restored=bracket_depth>0 or '[' in raw
@@ -83,6 +86,7 @@ class Builder:
                 gap=stripped in {'x','X','...','…','(x)'}
                 simple=bool(re.fullmatch(r'[^\W\d][\w₀-₉]*',stripped))
                 kind='gap' if gap else ('derived_sign' if derived else ('reading' if simple else 'unsupported'))
+                if blocked_line: kind='unsupported'
                 reading=None if kind in {'gap','unsupported'} else stripped
                 preservation='unknown' if derived else ('lost' if restored else ('damaged' if '#' in raw else 'unknown'))
                 certainty='unknown' if derived or kind!='reading' else ('uncertain' if '?' in raw else 'unmarked')
