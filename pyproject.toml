@@ -1,0 +1,8 @@
+[project]
+name = "cuneiform-research"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["duckdb==1.4.3"]
+
+[project.scripts]
+cuneiform = "cuneiform.cli:main"
