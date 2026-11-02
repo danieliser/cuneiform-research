@@ -87,3 +87,7 @@ An admitted future export can `COPY (SELECT * FROM nodes ORDER BY id)` and `COPY
 - Alias targets remain claim strings. Exact catalog-key lookup yields candidates without an equivalence edge. Missing catalog targets remain unresolved strings; duplicate claims remain separate nodes.
 
 This is an executable SQL view plus a portable export contract, not a running FalkorDB deployment. No FalkorDB install/container/service or live validation occurred. Actual node/edge Parquet export is deferred under the disk guard, as are all new persisted projection exports.
+
+### Reviewed query restrictions
+
+Graph `motif` and array counting require one textual namespace/snapshot per connection/field and reject multi-scope inputs. Use explicitly scoped projection lookup for shared multi-source connections. Strict graph and index windows require readable, intact, certain positions, including wildcard positions; source-policy wildcards can cover opaque positions. `trace_rows` checks bytes against the occurrence source binding and supplied hash, then checks the complete located record. Its rights metadata is labeled caller-supplied; `trace` uses the verified snapshot manifest. Neither path authenticates a legal grant.

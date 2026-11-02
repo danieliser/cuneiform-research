@@ -150,3 +150,9 @@ Disk evidence: start available **1,774,836 KiB**, later **1,762,320 KiB** (~1.68
 **Unverified new disk behavior:** schema-2 import, optional projection Parquet export/readback, persistent snapshot reuse/relocation and frozen-database rebuild refusal. Historical schema-1 parent disk success is preserved above, not extended to these changes. Portable graph export is a contract over executable views; no FalkorDB service or live FalkorDB validation occurred. ORACC, word/lemma/sense population, translation alignment, image evidence, alternative-aware bounds and the full SPEC remain future work. Source rights remain unresolved as previously documented.
 
 Final report smoke passed after bounding summary coverage to 20 rows with a truncation flag. Frozen specifications and every review file were compared byte-for-byte against baseline Git contents and matched. `git diff --check` passed. `gitleaks dir . --redact --no-banner` scanned approximately 316 KB with **no leaks found**, retaining only the existing narrow frozen-spec false-positive exception. Local commit only; no remote action.
+
+## Parent linked-review corrections
+
+Fixed the three P2 findings in reviews/linked-projections-review-v0.1.md: source traces validate raw hash/source binding and whole record before attaching provenance; graph/array APIs reject pooled textual namespace/snapshot scopes (scoped lookup remains available); strict graph wildcard matching requires non-null readings, matching indexed eligibility. Added three regressions reproducing the original failures. Rights attribution distinguishes caller-supplied metadata from verified snapshot manifests; no authentication claim. Disk remains below the 3 GiB reserve, so schema-2 persistent validation stays deferred.
+
+Parent rerun: 31 tests in 10.129s, 30 passed and one disk test skipped. Secret scan passed (336 KB scanned); diff whitespace check passed. No downloads, service changes or corpus writes.
