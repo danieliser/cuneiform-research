@@ -138,7 +138,7 @@ class ProjectionTests(unittest.TestCase):
             def check(m):
                 m['manifest_sha256']=digest(canonical({k:v for k,v in m.items() if k!='manifest_sha256'}).encode())
                 original=Path.read_text
-                with patch.object(Path,'read_text',lambda p,*a,**kw:json.dumps(m) if p.name=='manifest.json' else original(p,*a,**kw)),patch.object(Path,'read_bytes',return_value=payload),patch.object(Path,'stat',return_value=SimpleNamespace(st_size=len(payload))):return verify(Path('/nonexistent'),sid)
+                with patch.object(Path,'read_text',lambda p,*a,**kw:json.dumps(m) if p.name=='manifest.json' else original(p,*a,**kw)),patch.object(Path,'read_bytes',return_value=payload),patch('cuneiform.storage.file_sha256',return_value=sha),patch.object(Path,'stat',return_value=SimpleNamespace(st_size=len(payload))):return verify(Path('/nonexistent'),sid)
             self.assertEqual(check(manifest)['snapshot_id'],sid)
             del manifest['files']['parquet/occurrence.parquet']
             with self.assertRaisesRegex(ValueError,'inventory'): check(manifest)

@@ -1,86 +1,80 @@
-# Cuneiform graph and ingestion foundation
+# Cuneiform graph and text-corpus pilot
 
-A runnable local Python/DuckDB foundation for the authoritative [SPEC-v0.2](SPEC-v0.2.md). It preserves source readings, uncertainty and provenance while exposing typed graph edges and gap-safe motifs. This is a narrow implementation, not the full research workbench.
+A local Python/DuckDB implementation of the authoritative [SPEC-v0.2](SPEC-v0.2.md). It preserves source readings, uncertainty and provenance; exposes typed graph edges, gap-safe motifs and portable graph exports; and now runs on **real persisted text data** from three sources. It is a pilot, not the full research workbench.
 
-**Current delivery:** linked sequence positions, source-span lookup, indexed reading/sign postings, bounded n-grams, graph traversal, ambiguous catalog aliases and translation-context lookup. Schema 2 / conservative-3 / linked-1 are exercised in memory on synthetic and already-retained eBL/CDLI samples. See [representation map and runnable recipes](docs/REPRESENTATION-MAP.md). Historical schema-1 disk checks passed; new schema-2 persistent/Parquet behavior remains unverified because the 3 GiB reserve is blocked. ORACC, word/lemma alignment, services, UI, images and models remain unavailable.
+**Current delivery (2026-11-03):** the complete frozen eBL text export (73.9 MB, MD5-verified) is acquired, inspected in full by streaming, and sampled into reproducible cohorts of 30 and 300 records. Those cohorts are persisted as immutable snapshots with Parquet, indexed postings/n-grams and parent-file byte traces. ORACC `ccpo` (official JSON export) supplies WordToken/Lemma/Sense for 51 texts that match eBL records by exact P-number. Bounded CDLI catalog records exist for the same 51 P-numbers. Source audit: [docs/SOURCE-AUDIT.md](docs/SOURCE-AUDIT.md). Contracts per source: [docs/INGESTION-DESIGN.md](docs/INGESTION-DESIGN.md). Organizations and query recipes: [docs/REPRESENTATION-MAP.md](docs/REPRESENTATION-MAP.md). Evidence and measurements: [CHECKPOINT.md](CHECKPOINT.md).
 
-## Run now without corpus writes
+## Persisted pilot snapshots
 
-Python 3.11+ and `duckdb==1.4.3` are the only runtime requirements. This machine already has a working external environment:
+Runtime root `~/.local/share/cuneiform-research` (override with `CUNEIFORM_STORAGE_ROOT` or `--root`). Nothing from the corpus is packaged in Git.
+
+| Snapshot | Source / scope | Contents |
+|---|---|---|
+| `snapshot:ce127437339109285185a534145edf50` | eBL cohort 30 of 20,896 eligible (`cohort:9abad6ce…`) | 10,148 positions, 28,330 n-grams, 25 unaligned translation lines |
+| `snapshot:84971360d212834e0b7acbeac1e56abe` | eBL cohort 300 of 20,896 eligible (`cohort:4e86952e…`; the 30 are its first 30) | 80,823 positions, 223,799 n-grams, 50,391 postings, 366 unaligned translation lines |
+| `snapshot:c316e7cbbaf8a7fca7705f0efa5c4a07` | eBL, all 51 eligible records whose `cdliNumber` is an ORACC ccpo text (`cohort:ea91baae…`) | 20,421 positions |
+| `snapshot:edaab55c1a39cc65ad7c76e6d12547a7` | ORACC ccpo, those 51 texts | 6,888 words; 4,544 lemmatized words with contextual English sense; 1,122 lemmas; 1,317 senses |
+| `snapshot:fc7c350439f9edfee61b5f35bdd4d65a` | CDLI cdli.earth catalog JSON, same 51 P-numbers | 51 artifacts, 334 attributed alias claims, no text |
+
+Counts are **within the selected scope**, never corpus frequencies. `scope` and every `lookup` response say so explicitly.
+
+## Run
 
 ```sh
 cd /Users/danieliser/Projects/Fun/cuneiform-research
-PY=/Users/danieliser/.local/share/cuneiform-research/venv/bin/python
-$PY -B -m cuneiform demo ebl fixtures/ebl-synthetic.json A B C
-$PY -B -m cuneiform demo ebl fixtures/ebl-synthetic.json A '?' C
-$PY -B -m cuneiform demo cdli fixtures/cdli-synthetic.csv A B
-$PY -B -m unittest discover -s tests -v
+PY=/Users/danieliser/.local/share/cuneiform-research/venv/bin/python   # Python 3.13, duckdb==1.4.3 only
+c() { "$PY" -B -m cuneiform "$@"; }   # works in bash and zsh
+S300=snapshot:84971360d212834e0b7acbeac1e56abe; ORACC=snapshot:edaab55c1a39cc65ad7c76e6d12547a7
+EBL51=snapshot:c316e7cbbaf8a7fca7705f0efa5c4a07; CDLI=snapshot:fc7c350439f9edfee61b5f35bdd4d65a
+
+c snapshots                                   # verify all; each row has a scope label
+c scope $S300                                 # cohort size, eligible/parent denominators, rule, parent receipt
+c lookup $S300 report
+c lookup $S300 postings ABZ579 --field signs
+c lookup $S300 motifs '["ABZ480","ABZ13"]' --field signs --limit 5
+c lookup $S300 motifs '["ina","?","ana"]'     # ? = exactly one represented position
+c parity $S300 '["ABZ480","ABZ13"]' --field signs   # graph / array / index: 201 / 201 / 201
+c query  $S300 DIŠ ina                       # graph motif with denominators
+c trace  $S300 occurrence:ee78553cad17f460f7ad9f287877021c   # payload -> parent Zenodo file byte span
+c lookup $S300 translations "" --limit 3    # translation strings with unresolved spans
+c lookup $ORACC lemmas --limit 5
+c lookup $ORACC words šumma --limit 3
+c trace-word $ORACC <word id from the previous command>      # payload -> parent zip member
+c catalog-link cdli:P461271 --snapshot $EBL51 --snapshot $ORACC --snapshot $CDLI
+c catalog-link ebl:BM.59739 --snapshot $EBL51 --snapshot $ORACC --snapshot $CDLI
+c export-graph $S300                          # nodes/edges Parquet + receipt under derived/exports
+$PY -B -m unittest discover -s tests                         # 43 tests; 5 disk tests skip
+CUNEIFORM_RUN_DISK_TESTS=1 $PY -B -m unittest discover -s tests
 ```
 
-Expected synthetic graph/array counts: `A B C` = **6**, `A ? C` = **11**, `A C` = **0**. `?` explicitly permits one represented position, including a gap/unsupported position. Demo output includes sequence/index/graph count parity, projection coverage, graph matches and an exact raw-source trace. Runtime remains in memory and DuckDB disk spill is disabled. The test suite includes a gated disk test that skips by default; the actual-source test skips on machines without the private local evidence files.
-
-The real frozen README example can also be exercised without disk ingestion:
+Reproduce from scratch (acquisition is network work; each step writes immutable, checksum-verified outputs and refuses to rebuild a published snapshot ID):
 
 ```sh
-EVIDENCE=/Users/danieliser/.local/share/cuneiform-research/evidence
-$PY -B -m cuneiform demo ebl "$EVIDENCE/ebl-frozen-example.json" ABZ215 ABZ13 --field signs
-$PY -B -m cuneiform demo ebl "$EVIDENCE/ebl-one" A B
-$PY -B -m cuneiform demo cdli "$EVIDENCE/cdli-three.csv" A B
+c acquire https://zenodo.org/api/records/10018951/files/fragments.json/content --max-bytes 73854507 \
+   --expect-md5 71538e2d86c8ba6d47f499892bb3e5d3 --expect-bytes 73854507 \
+   --label ebl-zenodo-10018951-fragments.json --rights sources/rights/ebl-zenodo-10018951.json
+c receipts
+c corpus-inspect <receipt>                     # ~100 s, peak memory ~48 MB
+c corpus-select  <receipt> --size 30           # then --size 300
+c corpus-audit   <cohort> --markdown
+c corpus-import  <cohort>
+# ORACC serves its leaf certificate without the intermediate; supply the verified intermediate (see INGESTION-DESIGN).
+c acquire https://oracc.museum.upenn.edu/json/ccpo.zip --max-bytes 10006811 --expect-bytes 10006811 --chain-intermediate <InCommon RSA Server CA 2 PEM>
+c corpus-select <ebl receipt> --cdli-from-oracc <ccpo receipt> --project ccpo
+c oracc-import <ccpo receipt> --project ccpo --texts-from-snapshot <eBL overlap snapshot>
+c cdli-import --from-snapshot <eBL overlap snapshot> --allowlist sources/allowlist-cdli-ccpo-overlap.json
 ```
 
-These are small privately retained inspection samples, not a downloaded corpus. Full receipts include URLs, hashes, byte counts and failures in `evidence/source-receipts.json`. No real corpus text is packaged in repository fixtures.
+The older in-memory demos still work unchanged: `c demo ebl fixtures/ebl-synthetic.json A B C` (6/6/6), `c explore ebl fixtures/ebl-synthetic.json`.
 
-## Persistent commands after storage admission
+## Rules the implementation enforces
 
-Default root: `~/.local/share/cuneiform-research`. Override with `CUNEIFORM_STORAGE_ROOT` or global `--root /approved/external/path`. Keep runtime data outside Projects. Long-term storage is undecided; no new volume is assumed. Bulk ingestion remains deferred; every write admission still enforces the reserve.
+- **Immutable publication.** Builds are staged in `.pending-*`, published by one atomic rename, made read-only and recorded in an append-only ledger (`snapshots/.publication-ledger.jsonl`). An ID that was ever published can never be published again, even after deletion. IDs bind payload hash, namespace, source, schema/parser versions, record/cohort ID, citation, projection config and (new snapshots) the manifest contract `manifest-3`.
+- **Provenance.** Raw bytes live in `raw/sha256/<hash>` with one receipt per acquisition (URL, time, headers, hashes, rights statements). Cohort payloads are byte-identical parent slices. `trace` re-hashes the parent file and returns the token's absolute byte span in it, covering the JSON-escaped encoding (e.g. `ša₂` for `ša₂`).
+- **No invented layers.** Gaps and unsupported positions never concatenate. Readings are not converted into visual sign identities. ATF and `signs` are never aligned or pooled. Translation strings keep `unresolved-span`. ORACC senses are lexical glosses, not translations. Cross-source links are exact-key claims, never merges. Namespaces and snapshots are never pooled by graph/array queries.
+- **Freshness without O(corpus) rehash.** A read-only connection whose `graph.duckdb` SHA256 was just verified against its manifest uses the registry hashes recorded at freeze time. Other connections recompute.
+- **Budgets.** Default root budget 5 GiB, free-space reserve 10 GiB, checked before every write. Small-input imports stay capped at 2 MiB. Cohort imports stream record by record.
 
-On a future machine with sufficient approved space, install into an external virtual environment with `python3 -m venv "$ROOT/venv"` and `"$ROOT/venv/bin/pip" install --no-cache-dir duckdb==1.4.3`. This session's installed environment used roughly 50 MiB, far below the 500 MiB task cap.
+## Limits
 
-```sh
-# Read-only inspection and dry-run report work even when admission is blocked.
-$PY -B -m cuneiform inspect ebl fixtures/ebl-synthetic.json
-$PY -B -m cuneiform import ebl fixtures/ebl-synthetic.json --dry-run --source-url synthetic:fixture
-
-# Run only after reserve is restored. Import will still enforce it.
-$PY -B -m cuneiform import ebl fixtures/ebl-synthetic.json --source-url synthetic:fixture
-# Set SNAP to the snapshot ID printed by that command.
-$PY -B -m cuneiform manifest "$SNAP"
-$PY -B -m cuneiform query "$SNAP" A B C
-$PY -B -m cuneiform query "$SNAP" A '?' C
-$PY -B -m cuneiform query "$SNAP" A B C --max-skip 2
-$PY -B -m cuneiform query "$SNAP" A B C --strict
-# Set OCC to an occurrence ID returned in a match.
-$PY -B -m cuneiform trace "$SNAP" "$OCC"
-CUNEIFORM_RUN_DISK_TESTS=1 $PY -B -m unittest discover -s tests -v
-```
-
-`--max-skip 2` means `A B [0–2 represented positions] C`, not 0–2 reconstructed ancient signs. Unknown-length losses remain one unknown-extent represented position. Exact patterns cannot jump them. All queries are line-local and select one explicit snapshot plus sequence field; ATF and derived-sign sequences are never mixed. Match IDs deduplicate identical spans. Counts report witness/artifact support and represented-position denominators; composition coverage is unknown. The returned match list is capped at 100, with a truncation flag; counts still cover the bounded input.
-
-`--strict` requires explicitly `intact` and `certain` positions. Current eBL subset does not assert either from an absence of editorial marks, so strict real-source counts are zero. Default source-reading counts include uncertain/restored readings and are labeled accordingly. Certain physical evidence count is separate. Alternative-aware global bounds remain unresolved, not invented confidence intervals.
-
-Other commands:
-
-```sh
-$PY -B -m cuneiform inspect oracc /path/to/small-local-project-record.json
-$PY -B -m cuneiform import ebl-atf /path/to/local.atf --record-id SOURCE-ID --namespace source-edition
-# Download is opt-in, bounded and reserve-gated; not needed for existing demos.
-$PY -B -m cuneiform fetch 'https://www.ebl.lmu.de/api/fragments/K.1' --allowlist fixtures/allowlist.json --max-bytes 32768
-```
-
-Import byte cap is 2 MiB. Defaults enforce a 500 MiB root budget and 3 GiB free reserve. Existing dependencies/data under that root count toward the budget. Downloads require exact HTTPS allowlisting, reject redirects and do not retry. Persistent import uses new staging directories and validates existing snapshots before reuse. Whole-file malformed JSON/CSV aborts before a snapshot; per-record mapping rejections are stored in `rejection` alongside raw values. No automatic destructive cleanup or migrations.
-
-## Implemented graph and source limits
-
-[Typed SQL schema](cuneiform/schema.sql) and [version/edge registry](cuneiform/model.py) separate Artifact, Witness, Composition/Passage, SequenceVersion/Line, editorial SignOccurrence, WordToken/Lemma/Sense, TranslationSegment, SourceRecord, SignType and exceptional Claim. `nodes`, `next_position`, and `token_context` are executable DuckDB graph views. Persistent export writes each typed base table to Parquet without pyarrow. Paths never enter source/node identities.
-
-| Source | Actually exercised | Populated layers | Limits/rights |
-|---|---|---|---|
-| eBL frozen README example | One complete embedded record, in memory | metadata, separate ATF and source-derived signs, translation strings, alias claim | Full frozen JSON envelope unverified; ATF parser is conservative subset; Zenodo/paper license conflict unresolved |
-| eBL live K.1 | One bounded 11,108-byte response | artifact metadata and CDLI alias | Empty text; no witness fabricated; photos/OCR not followed |
-| CDLI historical CSV | 16 KiB prefix, first three complete rows | metadata/artifacts and museum aliases | No name-based merges; freshness and data rights unknown |
-| ORACC | Failed official docs requests; local JSON inspection path | none | Import refuses; no verified word/lemma/English mapping or project license |
-| Synthetic fixtures | uncertainty, gaps, alternatives, compounds, duplicate aliases | structural/query tests | Engineering fixtures, not philological evidence |
-
-ATF compounds, determinatives, numerals and alternatives are retained as opaque blocking positions rather than falsely split signs. Raw metadata and editorial marks remain recoverable. `signs` labels are source-attributed reading derivations, never image evidence; no alignment to ATF positions is invented. Translation placement is known but its span is unresolved, so no word-level translation edge exists. Unavailable Composition/Passage/Word/Lemma/Sense layers stay empty. Interpretation branching and alternative-hypothesis evaluation are deferred.
-
-See [source-by-source ingestion design](docs/INGESTION-DESIGN.md) for exact format evidence, rights ledger, identity/version rules, acquisition/resume strategy and remaining gates. See [checkpoint](CHECKPOINT.md) for test output, disk measurements and parent-review handoff. Frozen specs and review predecessors remain unchanged.
+eBL rights are an unresolved conflict (Zenodo CC BY 4.0 vs data paper CC BY-NC-SA 4.0). The ORACC JSON states CC0 and the CDLI terms cover text reuse; neither was legally reviewed. The ATF parser is a conservative subset: hyphenated words are opaque blockers, so ATF reading motifs are sparse and source-derived `signs` carry most motifs. Strict physical-evidence counts are zero because the export never asserts intact+certain. ORACC translation text is absent from its JSON, and ORACC graphemes are not yet mapped to sign occurrences. No compositions, passages, dates, joins, images or embeddings exist. FalkorDB and MCP are later tasks (QUEUE Q-009/Q-010); the portable export is their input.

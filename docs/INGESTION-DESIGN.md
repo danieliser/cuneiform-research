@@ -1,5 +1,7 @@
 # Source ingestion design and evidence
 
+> **2026-11-03 update.** The section "Corpus pilot contracts (2026-11-03)" at the end supersedes earlier statements in this file about: the unverified eBL envelope (it is a top-level array), ORACC being unreachable or import-refused (official JSON exports are now acquired and mapped), the 500 MiB / 3 GiB budget (now 5 GiB / 10 GiB) and blocked disk verification (now exercised). Earlier text is kept as history.
+
 2026-11-02. Implementation foundation, not the complete SPEC-v0.2 milestone. Sole writer; independent parent review pending. Long-term storage destination remains undecided. No source corpus is redistributed here: repository fixtures are explicitly synthetic. Local inspected bytes and receipts are under `~/.local/share/cuneiform-research/evidence/`.
 
 ## Common acquisition and storage contract
@@ -91,3 +93,37 @@ CuneiML, eBL OCR and collection image APIs are future contracts only. Before any
 The parent explicitly permits completion with disk-backed verification blocked. Actual disk reserve failed before snapshot import; later headroom rebounded, but the parent limited remaining writes to 10 MiB and explicitly accepted a blocked disk-verification handoff. In-memory adapter, trace and graph results are exercised. Persistent snapshot idempotence, relocation and Parquet readback have executable gated tests but are **not verified** until storage is approved and the reserve restored. See README and CHECKPOINT for exact commands.
 
 Also deferred: full eBL grammar, sign inventory validation, compatible alternative assignment bounds, lemma motifs, source-aligned translations, physical join inference, 30-record cohort audit, linguistic review, cross-snapshot artifact deduplication, production scale/performance, full SPEC/MCP delivery. No structural success establishes scholarly truth.
+
+
+## Corpus pilot contracts (2026-11-03)
+
+Common to every source: acquisition through `cuneiform acquire` only. It uses an exact HTTPS allowlist ([sources/allowlist.json](../sources/allowlist.json), [sources/allowlist-cdli-ccpo-overlap.json](../sources/allowlist-cdli-ccpo-overlap.json)), refuses redirects, does not retry, enforces a byte cap and optional MD5/SHA256/size expectations, and retains nothing on mismatch. Bytes go to `raw/sha256/<sha256>` (read-only). One immutable receipt per event goes to `receipts/` (URL, HTTP status, selected headers, start/finish time, bytes, MD5, SHA256, expectations, TLS mode, rights statements, context). Snapshots are published once (ledger, read-only; see README). Each snapshot binds a derived selection file (`cohort.json` or `selection.json`) by hash, which maps every payload element to its exact parent bytes.
+
+### eBL frozen export — contract `ebl-cohort` (scanner `json-array-stream-1`, selector `ebl-cohort-select-1`, format `cohort-1`)
+
+- Source: Zenodo record 10018951 (latest version per record API; the earlier version 8301762 v1.0 lists the same MD5), `fragments.json`, 73,854,507 bytes, MD5 `71538e2d86c8ba6d47f499892bb3e5d3`, SHA256 `4e970d87…d753`, receipt `receipt:66b5c94472b500317dbebd173bc149d3`. Supporting receipts: record API `receipt:f27ed560…`, versions `receipt:2fd7df94…`, JOHD paper HTML `receipt:999d8089…`.
+- Envelope observed: top-level array of 23,289 objects. The scanner also accepts a leading `{"fragments": [...]}` member, and refuses non-object elements, trailing data, invalid UTF-8 and records over 4 MiB. Memory is one chunk plus one record (measured peak ≈48 MB).
+- Locators: parent array index and pointer (`/4573`), parent byte range, record SHA256. The cohort payload index (`/48`) is the snapshot source-record locator. Token offsets are UTF-8 bytes in the decoded field. `trace` additionally returns the absolute parent-file byte span of the JSON-escaped token.
+- Mapping: unchanged conservative adapter (`conservative-3`) applied record by record (`ingest_record`, atomic per record) with spooled bulk loading. `cdliNumber` becomes an attributed `catalog_alias` claim. All other metadata stays raw.
+- Selection: rule `usable-text-v1` (see SOURCE-AUDIT) plus an optional exact `cdliNumber` set (`cdli_in`, e.g. ORACC ccpo corpus keys). Selection is deterministic by hashed order, smaller sizes are prefixes, and cohort ID = (format, selector, parser, parent SHA256, rule, size).
+- Rights: unresolved conflict, recorded in [sources/rights/ebl-zenodo-10018951.json](../sources/rights/ebl-zenodo-10018951.json). Zenodo metadata says `cc-by-4.0`. The JOHD paper License section says data CC BY-NC-SA 4.0, code MIT, photographs require consent.
+
+### ORACC — contract `oracc-cdl-1`
+
+- Source: `https://oracc.museum.upenn.edu/json/ccpo.zip` (listed on `/json/`), 10,006,811 bytes, SHA256 `c728b1f6…9bae`, Last-Modified 2024-07-01, receipt `receipt:0ca4ede9acc4d972c3f6d5cf69d4b8af`. Documentation `doc/opendata/json/index.html` (receipt `receipt:b8b57dfd…`) defines the `catalogue`, `corpus` and `cdl` types. `oracc.org` refused connections. Per-project `manifest.json` / `metadata.json` URLs return empty bodies, so the zip is the usable export.
+- TLS: the server presents only its leaf certificate. The missing intermediate *InCommon RSA Server CA 2* was fetched from the leaf's AIA "CA Issuers" URL (Sectigo) and verified against the system USERTrust root (PEM SHA256 `6e5a1f3c…0e2a`, kept at `<root>/trust/`). It is supplied with `--chain-intermediate`. Validation stays on, hostname checks stay on, and partial-chain trust is disabled so the chain must end at a system root. Receipts record this.
+- Payload: JSON array of the exact decompressed members `[metadata.json, catalogue.json, corpusjson/<P>.json …]`. `selection.json` records member names, CRC-32, SHA256 and byte ranges.
+- Mapping: one SourceRecord/Artifact/Witness per text (namespace `oracc/<project>`). `SequenceVersion` field `oracc-lem` (evidence `source-lemmatization`). Each `l` node becomes a WordToken (`form` = `f.form`; locator with source word id, `ref`, line label, `frag`, pointer). Words with `f.cf` get `LEMMATIZED_AS` → Lemma, keyed by (project, snapshot, lang, cf, gw, pos), with qualification `sig`, `inst`, `epos`, `norm`, `guideword`. A lemma row is attributed to its first attesting text in sorted order, and every attestation is an edge. `f.sense` gives `IN_SENSE` → Sense (guideword, gloss) plus `HAS_SENSE` from Lemma. Words without `cf` are kept and excluded from Lemma with a reason.
+- Claims: `cdli:<P>` only when the catalogue entry says `xproject=CDLI`. `ebl:<key>` from positional pairing of `external_resources` with `external_resources_key`, and only when the two lists have equal length; otherwise an exclusion is recorded.
+- Not mapped: translations (absent from the JSON; listed `tr-en` texts get an exclusion), graphemes (`f.gdl`, kept raw), glossary files and indexes.
+- Rights: the files state CC0 1.0. The documentation site footer says CC BY-SA 3.0. Both are recorded and neither was legally reviewed.
+
+### CDLI — contract `cdli-artifact-json-1`
+
+- Source: the current framework `https://cdli.earth/artifacts/<id>.json` (documented on `/docs/api`, receipt `receipt:84e65372…`; the old `cdli.mpiwg-berlin.mpg.de` redirects there). One receipt per record, serial requests at 1 s spacing, P-numbers taken only from existing attributed `cdli:` claims (here the eBL ccpo-overlap snapshot), at most 100 records.
+- Mapping: Artifact `cdli:<P>`. Claims: `catalog-label:<museum_no|accession_no>`, `ebl:<key>` for the `eBL` external resource, `external:<abbrev>:<key>` for the others. No witness or text: inscriptions are not fetched, and every record gets the exclusion "catalog record only".
+- Rights: Terms of Use (receipt `receipt:b559b49a…`) allow free academic reuse of transliterations and translations with attribution, and non-commercial use of images. Catalog metadata is not separately addressed.
+
+### Linking across sources
+
+`catalog-link KEY --snapshot …` lists, per verified snapshot, the alias claims whose object is KEY and the artifacts whose `namespace:catalog_key` is KEY. Links are candidates only. Independence is unknown, nothing is merged, and no name or label matching is used. Observed: ORACC→eBL (51/51), CDLI→eBL (51 of 54 keys inside the cohort) and eBL→CDLI P-numbers agree for every resolvable pair (SOURCE-AUDIT).

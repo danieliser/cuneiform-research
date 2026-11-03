@@ -1,0 +1,10 @@
+{
+  "status": "unresolved-conflict",
+  "claims": [
+    {"source": "Zenodo record 10018951 metadata.license (record API, acquired 2026-11-03)", "license": "cc-by-4.0", "scope": "record as a whole"},
+    {"source": "JOHD data paper doi:10.5334/johd.148, License section (HTML acquired 2026-11-03)", "license": "CC BY-NC-SA 4.0", "scope": "Data (fragments.json); Python code MIT; photographs require explicit consent of projects, institutions and holding museums"}
+  ],
+  "reuse": "not cleared; private local research inspection only; no redistribution, no repository packaging",
+  "decision": "neither statement is chosen; the stricter one does not establish the applicable grant",
+  "authentication": "checksums bind bytes; they do not authenticate a legal grant"
+}

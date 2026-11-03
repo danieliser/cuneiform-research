@@ -5,6 +5,9 @@ from .model import canonical, digest, identity
 
 REVISION = 'linked-1'
 OPTIONAL_TABLES = {'posting', 'ngram'}
+# Defaults stay small (20,000 / 100,000); corpus snapshots opt into these ceilings explicitly.
+HARD_MAX_POSITIONS = 2_000_000
+HARD_MAX_ROWS = 20_000_000
 
 @dataclass(frozen=True)
 class ProjectionConfig:
@@ -25,7 +28,7 @@ class ProjectionConfig:
             raise ValueError('unique policies source/strict required')
         if not set(self.lengths) <= {2,3,4,5} or len(set(self.lengths)) != len(self.lengths):
             raise ValueError('unique ngram lengths 2–5 required')
-        if not 1 <= self.max_positions <= 20000 or not 1 <= self.max_rows <= 100000:
+        if type(self.max_positions) is not int or type(self.max_rows) is not int or not 1 <= self.max_positions <= HARD_MAX_POSITIONS or not 1 <= self.max_rows <= HARD_MAX_ROWS:
             raise ValueError('projection budget exceeds hard cap')
 
 
@@ -36,84 +39,125 @@ def rows(db, sql, args=()):
 
 
 def canonical_hash(db):
-    """Fingerprint all canonical tables, including claims/edges/uncertainty edits."""
+    """Fingerprint all canonical tables, including claims/edges/uncertainty edits. Streams in batches."""
     tables = [r[0] for r in db.execute("SELECT table_name FROM information_schema.tables WHERE table_type='BASE TABLE' ORDER BY table_name").fetchall() if r[0] not in OPTIONAL_TABLES | {'projection_registry'}]
     import hashlib
     h = hashlib.sha256()
     for table in tables:
         h.update(table.encode())
         # Canonical schema columns are scalar; sorted JSON gives stable independent order.
-        values = db.execute(f'SELECT * FROM {table} ORDER BY 1').fetchall()
-        for value in values: h.update(canonical(value).encode())
+        cursor = db.execute(f'SELECT * FROM {table} ORDER BY 1')
+        while batch := cursor.fetchmany(10000):
+            for value in batch: h.update(canonical(value).encode())
     return h.hexdigest()
+
+
+# Read-only connections whose graph.duckdb bytes were just verified against a manifest that recorded the
+# freeze-time registry hashes. Membership replaces the O(corpus) recomputation, never the check itself.
+import weakref
+FROZEN_VERIFIED: 'weakref.WeakSet' = weakref.WeakSet()
+
+
+def mark_frozen_verified(db, recorded: dict) -> None:
+    entry = rows(db,'SELECT id,revision,canonical_hash,source_hash FROM projection_registry')
+    if len(entry)!=1 or entry[0]['revision']!=REVISION or {k: entry[0][k] for k in ('id','canonical_hash','source_hash')}!=recorded:
+        raise ValueError('projection registry does not match the hashes recorded in the verified manifest')
+    if db.execute("SELECT current_setting('access_mode')").fetchone()[0]!='read_only':
+        raise ValueError('frozen fast path requires a read-only connection')
+    FROZEN_VERIFIED.add(db)
 
 
 def assert_fresh(db):
     entry = rows(db,'SELECT * FROM projection_registry')
-    if len(entry)!=1 or entry[0]['revision']!=REVISION or entry[0]['canonical_hash']!=canonical_hash(db):
+    if len(entry)!=1 or entry[0]['revision']!=REVISION:
         raise ValueError('missing or stale projections; rebuild in a new workspace')
-    return entry[0]
+    if db in FROZEN_VERIFIED:
+        return dict(entry[0], freshness='frozen-verified: graph.duckdb sha256 matched manifest; registry hashes recorded at freeze')
+    if entry[0]['canonical_hash']!=canonical_hash(db):
+        raise ValueError('missing or stale projections; rebuild in a new workspace')
+    return dict(entry[0], freshness='recomputed canonical hash')
 
 
-def build(db, config=ProjectionConfig()):
+POSITION_COLUMNS = 'o.id,o.field,o.line_id,o.sequence_id,o.position,o.reading,o.preservation,o.certainty,o.namespace,o.snapshot_id,o.witness_id,o.artifact_id,o.source_record_id'
+
+
+def _lines(db, fields):
+    """Stream configured positions one line at a time in (sequence, line ordinal, position) order."""
+    names = [c.split('.')[1] for c in POSITION_COLUMNS.split(',')] + ['sign']
+    cursor = db.execute(f"SELECT {POSITION_COLUMNS},m.target_id FROM ordered_position o LEFT JOIN edge m ON m.source_id=o.id AND m.kind='MAPS_TO_SIGN' WHERE o.field IN (SELECT unnest(?::VARCHAR[])) ORDER BY o.sequence_id,o.ordinal,o.position", [list(fields)])
+    current, line = None, []
+    while batch := cursor.fetchmany(20000):
+        for values in batch:
+            p = dict(zip(names, values))
+            if p['line_id'] != current and line:
+                yield line; line = []
+            current = p['line_id']; line.append(p)
+    if line: yield line
+
+
+def build(db, config=ProjectionConfig(), spool_dir=None):
+    """Replace optional projections atomically. spool_dir (import staging only) enables bulk loading."""
     config.validate()
     from pathlib import Path
+    from .bulk import Spool
     for _,_,filename in db.execute('PRAGMA database_list').fetchall():
         if filename and not Path(filename).parent.name.startswith('.pending-'):
             raise ValueError('cannot rebuild a frozen database; use memory or new import staging')
     fingerprint = canonical_hash(db)
     source_hash = digest(canonical(db.execute('SELECT * FROM source_binding ORDER BY 1').fetchall()).encode())
     projection_id = identity('projection',REVISION,asdict(config),source_hash,fingerprint)
-    # Fetch only cap+1, before any mutation. Expansion is linear in configured lengths/policies.
-    positions = rows(db,'SELECT * FROM ordered_position ORDER BY sequence_id,ordinal,position LIMIT ?', [config.max_positions+1])
-    if len(positions)>config.max_positions: raise ValueError('projection position budget exceeded')
-    signs = dict(db.execute("SELECT source_id,target_id FROM edge WHERE kind='MAPS_TO_SIGN'").fetchall())
-    posts, grams = [], []
-    lines = {}
-    for p in positions:
-        if p['field'] not in config.fields: continue
-        lines.setdefault(p['line_id'],[]).append(p)
-    for line in lines.values():
-        for policy in config.policies:
-            def eligible(p):
-                return p['reading'] is not None and (policy=='source' or (p['preservation']=='intact' and p['certainty']=='certain'))
-            def key(p):
-                return signs.get(p['id']) if p['field']=='signs' else identity('reading',p['namespace'],p['snapshot_id'],p['field'],p['reading'])
-            for i,p in enumerate(line):
-                scope = (p['namespace'],p['snapshot_id'],p['field'],policy)
-                if config.postings and eligible(p) and key(p):
-                    posts.append((identity('posting',projection_id,p['id'],policy),*scope,key(p),p['reading'],p['id']))
-                if config.ngrams:
-                    for n in config.lengths:
-                        window = line[i:i+n]
-                        if len(window)!=n: continue
-                        # Keep blockers in windows; do not enumerate their possible readings.
-                        if policy=='strict' and not all(eligible(w) for w in window): continue
-                        ids = [w['id'] for w in window]
-                        keys = [key(w) if eligible(w) else None for w in window]
-                        values = [w['reading'] if eligible(w) else None for w in window]
-                        grams.append((identity('ngram',projection_id,policy,ids),identity('match',ids[0],ids[-1]),*scope,n,canonical(keys),canonical(values),canonical(ids),p['sequence_id'],p['line_id'],p['position'],window[-1]['position'],p['witness_id'],p['artifact_id'],p['source_record_id']))
-                if len(posts)+len(grams)>config.max_rows: raise ValueError('projection row budget exceeded; nothing replaced')
+    # Count before any mutation. Expansion is linear in configured lengths/policies.
+    total_positions = db.execute('SELECT count(*) FROM ordered_position').fetchone()[0]
+    if total_positions>config.max_positions: raise ValueError('projection position budget exceeded')
     assets = sorted((['posting'] if config.postings else []) + (['ngram'] if config.ngrams else []))
-    db.execute('BEGIN TRANSACTION')
+    # Derived tables are created inside the final transaction; spools only stage rows.
+    posting_cols = [('id','VARCHAR'),('namespace','VARCHAR'),('snapshot_id','VARCHAR'),('field','VARCHAR'),('policy','VARCHAR'),('token_id','VARCHAR'),('label','VARCHAR'),('occurrence_id','VARCHAR')]
+    ngram_cols = [('id','VARCHAR'),('match_id','VARCHAR'),('namespace','VARCHAR'),('snapshot_id','VARCHAR'),('field','VARCHAR'),('policy','VARCHAR'),('length','INTEGER'),('token_ids','JSON'),('readings','JSON'),('occurrence_ids','JSON'),('sequence_id','VARCHAR'),('line_id','VARCHAR'),('start_position','INTEGER'),('end_position','INTEGER'),('witness_id','VARCHAR'),('artifact_id','VARCHAR'),('source_record_id','VARCHAR')]
+    posts = Spool.detached('posting', posting_cols, spool_dir)
+    grams = Spool.detached('ngram', ngram_cols, spool_dir)
     try:
-        for table in OPTIONAL_TABLES: db.execute(f'DROP TABLE IF EXISTS {table}')
-        if config.postings:
-            db.execute('CREATE TABLE posting(id VARCHAR PRIMARY KEY, namespace VARCHAR, snapshot_id VARCHAR, field VARCHAR, policy VARCHAR, token_id VARCHAR, label VARCHAR, occurrence_id VARCHAR)')
-            if posts: db.executemany('INSERT INTO posting VALUES (?,?,?,?,?,?,?,?)',posts)
-            db.execute('CREATE INDEX posting_identity ON posting(namespace,snapshot_id,field,policy,token_id)')
-            db.execute('CREATE INDEX posting_occurrence ON posting(occurrence_id)')
-        if config.ngrams:
-            db.execute('CREATE TABLE ngram(id VARCHAR PRIMARY KEY, match_id VARCHAR, namespace VARCHAR, snapshot_id VARCHAR, field VARCHAR, policy VARCHAR, length INTEGER, token_ids JSON, readings JSON, occurrence_ids JSON, sequence_id VARCHAR, line_id VARCHAR, start_position INTEGER, end_position INTEGER, witness_id VARCHAR, artifact_id VARCHAR, source_record_id VARCHAR)')
-            if grams: db.executemany('INSERT INTO ngram VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',grams)
-            db.execute('CREATE INDEX ngram_scope ON ngram(namespace,snapshot_id,field,policy,length)')
-        db.execute('DELETE FROM projection_registry')
-        db.execute('INSERT INTO projection_registry VALUES (?,?,?,?,?,?)',[projection_id,REVISION,canonical(asdict(config)),source_hash,fingerprint,canonical(assets)])
-        db.execute('COMMIT')
-    except BaseException:
-        db.execute('ROLLBACK')
-        raise
-    return {'id':projection_id,'revision':REVISION,'assets':assets,'postings':len(posts),'ngrams':len(grams),'canonical_hash':fingerprint,'source_hash':source_hash,'config':asdict(config)}
+        for line in _lines(db, config.fields):
+            for policy in config.policies:
+                def eligible(p):
+                    return p['reading'] is not None and (policy=='source' or (p['preservation']=='intact' and p['certainty']=='certain'))
+                def key(p):
+                    return p['sign'] if p['field']=='signs' else identity('reading',p['namespace'],p['snapshot_id'],p['field'],p['reading'])
+                for i,p in enumerate(line):
+                    scope = (p['namespace'],p['snapshot_id'],p['field'],policy)
+                    if config.postings and eligible(p) and key(p):
+                        posts.append((identity('posting',projection_id,p['id'],policy),*scope,key(p),p['reading'],p['id']))
+                    if config.ngrams:
+                        for n in config.lengths:
+                            window = line[i:i+n]
+                            if len(window)!=n: continue
+                            # Keep blockers in windows; do not enumerate their possible readings.
+                            if policy=='strict' and not all(eligible(w) for w in window): continue
+                            ids = [w['id'] for w in window]
+                            keys = [key(w) if eligible(w) else None for w in window]
+                            values = [w['reading'] if eligible(w) else None for w in window]
+                            grams.append((identity('ngram',projection_id,policy,ids),identity('match',ids[0],ids[-1]),*scope,n,canonical(keys),canonical(values),canonical(ids),p['sequence_id'],p['line_id'],p['position'],window[-1]['position'],p['witness_id'],p['artifact_id'],p['source_record_id']))
+                    if posts.count+grams.count>config.max_rows: raise ValueError('projection row budget exceeded; nothing replaced')
+        db.execute('BEGIN TRANSACTION')
+        try:
+            for table in OPTIONAL_TABLES: db.execute(f'DROP TABLE IF EXISTS {table}')
+            if config.postings:
+                db.execute('CREATE TABLE posting(id VARCHAR PRIMARY KEY, namespace VARCHAR, snapshot_id VARCHAR, field VARCHAR, policy VARCHAR, token_id VARCHAR, label VARCHAR, occurrence_id VARCHAR)')
+                posts.attach(db).load()
+                db.execute('CREATE INDEX posting_identity ON posting(namespace,snapshot_id,field,policy,token_id)')
+                db.execute('CREATE INDEX posting_occurrence ON posting(occurrence_id)')
+            if config.ngrams:
+                db.execute('CREATE TABLE ngram(id VARCHAR PRIMARY KEY, match_id VARCHAR, namespace VARCHAR, snapshot_id VARCHAR, field VARCHAR, policy VARCHAR, length INTEGER, token_ids JSON, readings JSON, occurrence_ids JSON, sequence_id VARCHAR, line_id VARCHAR, start_position INTEGER, end_position INTEGER, witness_id VARCHAR, artifact_id VARCHAR, source_record_id VARCHAR)')
+                grams.attach(db).load()
+                db.execute('CREATE INDEX ngram_scope ON ngram(namespace,snapshot_id,field,policy,length)')
+            db.execute('DELETE FROM projection_registry')
+            db.execute('INSERT INTO projection_registry VALUES (?,?,?,?,?,?)',[projection_id,REVISION,canonical(asdict(config)),source_hash,fingerprint,canonical(assets)])
+            db.execute('COMMIT')
+        except BaseException:
+            db.execute('ROLLBACK')
+            raise
+    finally:
+        posts.discard(); grams.discard()
+    return {'id':projection_id,'revision':REVISION,'assets':assets,'postings':posts.count if config.postings else 0,'ngrams':grams.count if config.ngrams else 0,'canonical_hash':fingerprint,'source_hash':source_hash,'config':asdict(config)}
 
 
 def bounded(db, sql, args=(), limit=20, offset=0):
@@ -161,6 +205,18 @@ def lookup(db, organization, value='', *, namespace=None, snapshot=None, field='
       'translations': ('SELECT * FROM translation_context WHERE contains(lower(text),lower(?)) OR id=? OR sequence_id=? OR source_record_id=? ORDER BY id',[value]*4),
       'neighbors': ('SELECT * FROM portable_edge WHERE source_id=? OR target_id=? ORDER BY id',[value,value]),
       'nodes': ('SELECT * FROM nodes WHERE id=? OR kind=? ORDER BY id',[value,value]),
+      # Word -> lemma -> contextual sense, exactly as the source asserts; senses are English lexical glosses, not translations.
+      'words': ("""SELECT w.id word_id,w.form,w.source_locator,s.source_record_id,s.witness_id,a.artifact_id,l.id lemma_id,l.citation_form,l.language,l.pos,
+                    se.id sense_id,se.guideword,se.gloss sense_gloss,'lexical gloss; not a translation' gloss_status
+             FROM word_token w JOIN sequence_version s ON s.id=w.sequence_id JOIN witness a ON a.id=s.witness_id
+             LEFT JOIN edge el ON el.kind='LEMMATIZED_AS' AND el.source_id=w.id LEFT JOIN lemma l ON l.id=el.target_id
+             LEFT JOIN edge es ON es.kind='IN_SENSE' AND es.source_id=w.id LEFT JOIN sense se ON se.id=es.target_id
+             WHERE w.id=? OR w.form=? OR l.citation_form=? OR l.id=? OR se.gloss=? OR s.source_record_id=?
+             ORDER BY s.source_record_id,CAST(json_extract(w.source_locator,'$.order') AS INTEGER)""",[value]*6),
+      'lemmas': ("""SELECT l.*,(SELECT count(*) FROM edge e WHERE e.kind='LEMMATIZED_AS' AND e.target_id=l.id) attestations,
+                     (SELECT count(DISTINCT e.source_record_id) FROM edge e WHERE e.kind='LEMMATIZED_AS' AND e.target_id=l.id) attesting_records,
+                     (SELECT list(s.gloss ORDER BY s.gloss) FROM sense s WHERE s.lemma_id=l.id) senses
+              FROM lemma l WHERE l.id=? OR l.citation_form=? OR ?='' ORDER BY attestations DESC,l.id""",[value]*3),
     }
     if organization not in recipes: raise ValueError('unknown organization')
     if organization.startswith('reverse-'):
@@ -180,6 +236,8 @@ def coverage(db):
       (SELECT count(*) FROM sequence_version s WHERE s.source_record_id=r.id) AS "sequences",
       (SELECT count(*) FROM word_token w JOIN sequence_version s ON w.sequence_id=s.id WHERE s.source_record_id=r.id) words,
       (SELECT count(*) FROM lemma l WHERE l.source_record_id=r.id) lemmas,
+      (SELECT count(*) FROM edge e WHERE e.kind='LEMMATIZED_AS' AND e.source_record_id=r.id) lemmatized_words,
+      (SELECT count(*) FROM edge e WHERE e.kind='IN_SENSE' AND e.source_record_id=r.id) words_with_sense,
       (SELECT count(*) FROM translation_segment t WHERE t.source_record_id=r.id) translations,
       (SELECT count(*) FROM translation_segment t WHERE t.source_record_id=r.id AND t.granularity='unresolved-span') unresolved_translations
       FROM source_record r JOIN source_binding b ON b.source_record_id=r.id ORDER BY r.id""")

@@ -42,5 +42,8 @@ class DiskDeliveryTests(unittest.TestCase):
                     observed=db.execute('SELECT count(*) FROM read_parquet(?)',[str(relocated/'parquet'/f'{table}.parquet')]).fetchone()[0]
                     self.assertEqual(count,observed)
             finally: db.close()
+            # Published payloads are read-only; tampering requires an explicit permission change.
+            with self.assertRaises(PermissionError): (relocated/'raw').write_bytes(b'tampered')
+            os.chmod(relocated,0o755); os.chmod(relocated/'raw',0o644)
             (relocated/'raw').write_bytes(b'tampered')
             with self.assertRaisesRegex(ValueError,'integrity'): verify(relocated)

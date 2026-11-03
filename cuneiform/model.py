@@ -55,5 +55,7 @@ EDGE_TYPES = {
     'HAS_SIGN': ('WordToken', 'SignOccurrence'),
     'LEMMATIZED_AS': ('WordToken', 'Lemma'),
     'HAS_SENSE': ('Lemma', 'Sense'),
+    # Contextual sense of one word instance, as asserted by the source lemmatization (ORACC f.sense).
+    'IN_SENSE': ('WordToken', 'Sense'),
     'TRANSLATES': ('TranslationSegment', 'Passage'),
 }

@@ -91,3 +91,29 @@ This is an executable SQL view plus a portable export contract, not a running Fa
 ### Reviewed query restrictions
 
 Graph `motif` and array counting require one textual namespace/snapshot per connection/field and reject multi-scope inputs. Use explicitly scoped projection lookup for shared multi-source connections. Strict graph and index windows require readable, intact, certain positions, including wildcard positions; source-policy wildcards can cover opaque positions. `trace_rows` checks bytes against the occurrence source binding and supplied hash, then checks the complete located record. Its rights metadata is labeled caller-supplied; `trace` uses the verified snapshot manifest. Neither path authenticates a legal grant.
+
+
+## Persisted corpus paths and backend contract (2026-11-03)
+
+This section supersedes the "Current disk limit" and "no FalkorDB runtime / export deferred" notes above: persistent schema-2 snapshots, optional-asset Parquet readback, relocation, frozen rebuild refusal and the portable export are now exercised on real data (see CHECKPOINT). Versions: schema `2`, parser `conservative-3`, projection `linked-1` (row IDs unchanged; the hard ceilings were raised to 2,000,000 positions / 20,000,000 rows for explicit corpus configs, defaults unchanged), manifest contract `manifest-3`, exporter `portable-graph-1`, adapters `ebl-cohort` (`cohort-1`), `oracc-cdl-1`, `cdli-artifact-json-1`.
+
+Read-only Python API for consumers such as the UI. Open nothing else and never write into `<root>/snapshots`:
+
+| Call | Returns |
+|---|---|
+| `storage.verify(path, sid)` | verified manifest; refuses any byte, identity or binding mismatch |
+| `persisted.scope(path)` | population the counts describe: `kind` (`rule-selected cohort` / `explicit selection` / `single input`), `label` (e.g. `COHORT 300/20,896 eligible of 23,289`), `scope_note`, cohort size, eligible and parent denominators, exclusions, rule, selector, parent sha/md5/bytes/url/receipt |
+| `persisted.lookup_snapshot(path, organization, value, field=, policy=, limit=, offset=)` | the organizations above plus `words` and `lemmas`; every response carries `scope` and `latency_ms` |
+| `persisted.parity(path, pattern, field)` | graph, array and index counts with denominators, scope and timings |
+| `query.trace(path, occurrence_id, parent_root=<research root>)` | token trace; for cohorts `parent_trace` with `status` (`verified` / `parent-raw-unavailable` / `parent-raw-not-requested`), parent receipt/url/pointer/record byte range, and `parent_file_byte_span` (absolute, half-open, over the JSON-escaped token) |
+| `oracc.trace_word(path, word_id, parent_root=<research root>)` | word → lemma → sense round trip in payload and parent zip member |
+| `persisted.catalog_link([paths], key)` | exact-key alias claims and catalog artifacts per snapshot; never a merge |
+| `persisted.export_graph(path, config)` | `derived/exports/<export id>/{nodes,edges}.parquet` + `receipt.json` (counts by kind, file hashes, dangling = 0) |
+
+`parent_root` is the research root (`~/.local/share/cuneiform-research`), not `root/raw`. The CLI mirrors all of these (`scope`, `lookup`, `parity`, `trace`, `trace-word`, `catalog-link`, `export-graph`, `snapshots`) with JSON output.
+
+**Discovery rules.** Only `<root>/snapshots/snapshot:<32 hex>` directories are snapshots. `.pending-*` stages are never snapshots. A snapshot directory appears through a single atomic rename of a complete build and is then read-only. `snapshots/.publication-ledger.jsonl` lists every published ID with its manifest SHA256; an ID in the ledger is never republished. Key caches by `(snapshot_id, manifest_sha256)`. Test and exploration stores live in temporary roots elsewhere and are not snapshots of the research root.
+
+**New organizations.** `words VALUE` matches a word ID, form, citation form, lemma ID, English sense gloss or source record. It returns word → lemma → contextual sense with `gloss_status = 'lexical gloss; not a translation'`. `lemmas [VALUE]` returns lemma rows with attestation counts, attesting records and the list of senses. Coverage rows add `lemmatized_words` and `words_with_sense`. `lemmas` there counts first-attestation attribution, not distinct lemmas used.
+
+**Freshness.** `assert_fresh` returns `freshness`. `frozen-verified` means the connection is read-only, its `graph.duckdb` SHA256 was verified against the manifest in this process, and the registry matches the hashes recorded at freeze (`manifest.projection_registry`, asserted fresh before publication). Anything else recomputes the canonical hash: measured 1.26 s per lookup at 300 records, against 0.04 s for a frozen-verified lookup and 0.10 s for connect+verify. Connections that are writable or opened outside `query.connect` always recompute.

@@ -156,3 +156,59 @@ Final report smoke passed after bounding summary coverage to 20 rows with a trun
 Fixed the three P2 findings in reviews/linked-projections-review-v0.1.md: source traces validate raw hash/source binding and whole record before attaching provenance; graph/array APIs reject pooled textual namespace/snapshot scopes (scoped lookup remains available); strict graph wildcard matching requires non-null readings, matching indexed eligibility. Added three regressions reproducing the original failures. Rights attribution distinguishes caller-supplied metadata from verified snapshot manifests; no authentication claim. Disk remains below the 3 GiB reserve, so schema-2 persistent validation stays deferred.
 
 Parent rerun: 31 tests in 10.129s, 30 passed and one disk test skipped. Secret scan passed (336 KB scanned); diff whitespace check passed. No downloads, service changes or corpus writes.
+
+
+## Persisted text-corpus pilot — implementation handoff (2026-11-03)
+
+Sole implementation writer (QUEUE Q-001), base `2ab620b`, no child agents. Parent independent review is pending; this is the writer's evidence, not approval. Atlas/QUEUE files (`AGENTS.md`, `CLAUDE.md`, `QUEUE.md`, `docs/MODEL-ATLAS.md`, `docs/model-atlas.*`, `scripts/`, `reviews/atlas-review-v0.1.md`) belong to the atlas worker and were neither edited nor committed here.
+
+**Model IDs affected:** `node:SourceRecord`, `node:Artifact`, `node:Witness`, `node:SequenceVersion`, `node:Line`, `node:SignOccurrence`, `node:SignType`, `node:TranslationSegment`, `node:Claim` (now populated from real data); `node:WordToken`, `node:Lemma`, `node:Sense` (now populated from ORACC); `edge:HAS_WORD`, `edge:LEMMATIZED_AS`, `edge:HAS_SENSE` (now written, with new qualification keys); new `edge:IN_SENSE` (WordToken→Sense); `artifact:snapshot-manifest` (new keys `snapshot_contract`, `projection_registry`, `build_timings`, `snapshot_payload_bytes`, `cohort`, `selection`, `ingestion`, `adapter`; new sources `ebl-cohort`, `oracc-selection`, `cdli-selection`); `contract:portable-graph-export` (implemented); `query:lookup` (`words`, `lemmas`, `scope`); `query:trace` (parent byte span); `view:portable_edge` (unchanged SQL). The atlas checker reports exactly this drift (10 errors at this tree); Q-007 owns the atlas sync.
+
+### What was built
+
+- `acquire`: allowlisted, checksum-verified downloads into a read-only content-addressed store, with immutable receipts; an explicit verified-intermediate option for ORACC's incomplete TLS chain.
+- `corpus`: bounded-memory streaming JSON array scanner with exact byte offsets; whole-file inspection using the real adapter; deterministic cohort extraction (`usable-text-v1`, optional exact P-number filter) into immutable manifests with byte-identical parent slices; per-record audit.
+- `storage.import_cohort`: chunked, record-atomic import with spooled bulk loading (single-row DuckDB inserts cost ~0.2 ms/row; spooled loads take ~0.08 s per 100k rows). Shared `materialize` and `publish`: atomic, exclusive, ledgered, read-only.
+- `oracc` (`oracc-cdl-1`), `cdli_api` (`cdli-artifact-json-1`), `persisted` (scope, lookups, parity, export, catalog link), `query.trace` parent byte spans, `trace-word`.
+- Projection builder streams positions per line and spools rows. Output is byte-identical to the previous build on every retained input (baseline canonical/projection row hashes compared before and after the refactor). The graph validator now uses per-kind semi-joins.
+
+### Actual data and measurements
+
+All on this machine with `~/.local/share/cuneiform-research/venv/bin/python -B` (Python 3.13.12, DuckDB 1.4.3). Times are wall clock (`/usr/bin/time -l`).
+
+| Step | Result |
+|---|---|
+| eBL `fragments.json` acquire | 73,854,507 B, MD5/size matched record API, 41 s; `receipt:66b5c94472b500317dbebd173bc149d3` |
+| Whole-file inspection | 23,289 records, 95 s, peak 48 MB; 1 duplicate key (K.5808 ×2, byte-identical), 0 adapter rejections |
+| Cohort select 30 / 300 | 100 s / 93 s, peak ≤54 MB; 20,896 eligible; 30 = first 30 of 300 |
+| Import 30 → `snapshot:ce127437339109285185a534145edf50` | 2.5 s, peak 419 MB, 32 MB on disk |
+| Import 300 → `snapshot:84971360d212834e0b7acbeac1e56abe` | 20.3 s, peak 632 MB, 174 MB on disk; 80,823 positions, 215,271 edges, 223,799 n-grams |
+| eBL∩ccpo cohort (51) → `snapshot:c316e7cbbaf8a7fca7705f0efa5c4a07` | 55 MB |
+| ORACC ccpo 51 texts → `snapshot:edaab55c1a39cc65ad7c76e6d12547a7` | 1.4 s, peak 242 MB, 36 MB |
+| CDLI 51 records → `snapshot:fc7c350439f9edfee61b5f35bdd4d65a` | 84 s (1 s spacing), 6 MB |
+| Parity at 300 records | graph = array = index for 7 motifs, e.g. `ABZ480 ABZ13` 201 (38/300 witnesses), `ABZ411×3` 174, `ABZ115 ? ABZ597` 104, `DIŠ ina` 45, `ina ? ana` 29. Graph ~150–180 ms, array ~150–170 ms, index ~10–12 ms |
+| Lookup latency at 300 | 1.28 s → 0.043 s after the frozen-verified freshness path; connect+verify 0.10 s |
+| Trace | `BM.34584` token `ina]` → parent `/4573`, file bytes [24,411,382, 24,411,386); `ša₂` → bytes `ša₂` [13,442,912, 13,442,925); both read back directly from the parent file |
+| Graph exports | 5 exports, 0 dangling edges; 300-record export 93,831 nodes / 217,365 edges in 0.6 s |
+| Runtime root | 479 MiB total (snapshots 302, raw 91, derived 35, venv 50); filesystem 152 GiB free |
+
+Strict-policy windows are 0, because no eBL position is asserted intact+certain. ATF reading motifs are sparse, because hyphenated words remain opaque blockers. These are the expected conservative outcomes, not defects.
+
+### Tests
+
+```
+CUNEIFORM_RUN_DISK_TESTS=1 .../python -B -m unittest discover -s tests   ->  Ran 43 tests in 15.4s  OK
+.../python -B -m unittest discover -s tests                              ->  Ran 43 tests  OK (skipped=5)
+```
+
+New regressions cover: scanner byte ranges at chunk sizes 1/3/7 with escaped/unescaped Unicode and both envelopes, and its structural refusals; adapter-stat/import agreement; dangling and wrong-type edge refusal; ORACC mapping (shared lemma, per-word senses, unlemmatized words, list-length mismatch, no translations); CDLI mapping and rejection; cohort determinism/prefix/duplicate exclusion; chunked (batch=1) vs whole-input canonical hash equality; parent-verified trace; relocation; parent and payload tamper detection; spool vs executemany equality; all five projection configurations with Parquet readback; frozen fast path vs writable recompute and stale detection; ledger refusal after deletion; read-only publication; encoded-span mapping; and the delivered real snapshots (gated on presence). Disk tests write only into temporary roots and delete them.
+
+### Incident: same-ID snapshot rebuild (reported by UI review F-4, verified here)
+
+At ~09:44Z I published `snapshot:ce127437…` and `snapshot:84971360…`. At ~09:46Z I deleted both directories and re-imported them under the same IDs, to add freeze-time registry hashes to the manifest. Each build was a complete staged directory published by one rename, so no file was written in place. The deletion and republication still violated immutability: readers saw different bytes under one ID. The other three snapshots were published once and never touched. First-version bytes were not retained, because I deleted them. The UI reviewer's size/mtime observations are the surviving evidence, and the first-run counts in my transcript equal the current manifests. Record: `~/.local/share/cuneiform-research/evidence/incident-2026-11-03-same-id-rebuild.json`.
+
+Remediation (tested): an append-only `snapshots/.publication-ledger.jsonl` written under an exclusive lock, which refuses any ID ever published, even after deletion; read-only published trees; manifest contract `manifest-3` included in new snapshot IDs (older manifests keep the legacy formula and still verify). The five existing snapshots were backfilled into the ledger (the two rebuilt ones carry an `incident` note), made read-only without byte changes, and re-verified. From here on, revisions get new IDs only.
+
+### Remaining limitations
+
+eBL rights conflict unresolved. ORACC CC0 statement and CDLI terms are recorded, not legally reviewed. ATF grammar subset: hyphenated words, determinatives, compounds and numerals are blockers. No signs↔ATF alignment and no translation alignment. ORACC graphemes are unmapped and its JSON carries no translation text. Only one ORACC project (ccpo) is imported. CDLI inscriptions were not fetched. No compositions, passages, dates, joins, images or embeddings. Cohorts are hash-ordered samples filtered for usable text, not representative corpus statistics. Full-corpus import was not attempted: at the measured ~155x payload ratio (174 MB for 1.12 MB at 300 records) one full-file snapshot would be roughly 11 GB, above the 5 GiB budget, so storage layout (e.g. Parquet-only or dropping duplicated raw_json) is a later decision. FalkorDB/MCP are next tasks. No remote push, release or publication.

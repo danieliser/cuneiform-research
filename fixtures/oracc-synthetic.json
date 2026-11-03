@@ -1,0 +1,21 @@
+{
+  "_note": "SYNTHETIC engineering fixture shaped like the ORACC JSON export contract (doc/opendata/json). Not ORACC data; no philological claim.",
+  "metadata": {"type": "metadata", "config": {"pathname": "synth", "name": "Synthetic"}, "formats": {"atf": ["P900001"], "lem": ["P900001"], "tr-en": ["P900001"]}},
+  "catalogue": {"type": "catalogue", "project": "synth", "license": "synthetic", "UTC-timestamp": "2000-01-01T00:00:00",
+    "members": {
+      "P900001": {"id_text": "P900001", "xproject": "CDLI", "uri": "http://cdli.ucla.edu/P900001", "external_resources": "eBL; CCPo", "external_resources_key": "X.1; P900001"},
+      "P900002": {"id_text": "P900002", "xproject": "CDLI", "external_resources": "eBL; CCPo", "external_resources_key": "X.2"}
+    }},
+  "texts": [
+    {"type": "cdl", "project": "synth", "textid": "P900001", "cdl": [{"node": "c", "type": "text", "cdl": [
+      {"node": "d", "type": "line-start", "ref": "P900001.3", "label": "o 1"},
+      {"node": "l", "frag": "a-na", "id": "P900001.l1", "ref": "P900001.3.1", "sig": "@synth%akk:a-na=ana[to//for]PRP'PRP$ana", "inst": "ana[for]PRP", "f": {"lang": "akk", "form": "a-na", "cf": "ana", "gw": "to", "sense": "for", "pos": "PRP", "epos": "PRP"}},
+      {"node": "l", "frag": "[x]", "id": "P900001.l2", "ref": "P900001.3.2", "f": {"lang": "akk", "form": "x", "pos": "u"}},
+      {"node": "d", "type": "line-start", "ref": "P900001.4", "label": "o 2"},
+      {"node": "l", "frag": "a-na", "id": "P900001.l3", "ref": "P900001.4.1", "sig": "@synth%akk:a-na=ana[to//to]PRP'PRP$ana", "f": {"lang": "akk", "form": "a-na", "cf": "ana", "gw": "to", "sense": "to", "pos": "PRP"}}
+    ]}]},
+    {"type": "cdl", "project": "synth", "textid": "P900002", "cdl": [
+      {"node": "l", "frag": "a-na", "id": "P900002.l1", "ref": "P900002.3.1", "f": {"lang": "akk", "form": "a-na", "cf": "ana", "gw": "to", "sense": "to", "pos": "PRP"}}
+    ]}
+  ]
+}

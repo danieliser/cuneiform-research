@@ -10,8 +10,18 @@ from .storage import verify
 def connect(path: Path | duckdb.DuckDBPyConnection):
     if isinstance(path, duckdb.DuckDBPyConnection):
         return path.cursor()
-    verify(path)
-    return duckdb.connect(str(path/'graph.duckdb'),read_only=True)
+    manifest=verify(path)
+    db=duckdb.connect(str(path/'graph.duckdb'),read_only=True)
+    if manifest['schema_version']!='1':
+        registry=db.execute('SELECT revision,config FROM projection_registry').fetchall()
+        spec=manifest['projection_spec']
+        if len(registry)!=1 or registry[0][0]!=spec['revision'] or json.loads(registry[0][1])!=spec['config']:
+            db.close(); raise ValueError('projection registry does not match manifest projection specification')
+        if 'projection_registry' in manifest:
+            from .projections import mark_frozen_verified
+            try: mark_frozen_verified(db,manifest['projection_registry'])
+            except ValueError: db.close(); raise
+    return db
 
 
 def require_single_scope(db, field):
@@ -63,7 +73,7 @@ def array_count(path: Path | duckdb.DuckDBPyConnection, pattern: list[str], fiel
     finally: db.close()
 
 
-def trace_rows(db, raw: bytes, manifest: dict, occurrence_id: str, *, verified_manifest: bool=False) -> dict:
+def trace_rows(db, raw: bytes, manifest: dict, occurrence_id: str, *, verified_manifest: bool=False, record_slice: tuple[int,int] | None=None) -> dict:
     cursor=db.execute('SELECT * FROM token_context WHERE id=?',[occurrence_id]); row=cursor.fetchone()
     if row is None: raise ValueError('unknown occurrence ID')
     token=dict(zip([d[0] for d in cursor.description],row))
@@ -75,8 +85,11 @@ def trace_rows(db, raw: bytes, manifest: dict, occurrence_id: str, *, verified_m
         binding=db.execute('SELECT snapshot_id,raw_sha256 FROM source_binding WHERE source_record_id=?',[token['source_record_id']]).fetchone()
         if binding is None or binding[1]!=raw_hash: raise ValueError('trace source binding mismatch')
         if manifest.get('snapshot_id',binding[0])!=binding[0]: raise ValueError('trace snapshot mismatch')
-    source_rows=dict(records(manifest['source'],raw))
-    record=source_rows[source[1]]
+    if record_slice is None:
+        record=dict(records(manifest['source'],raw))[source[1]]
+    else:
+        # Cohort payloads: decode only the bound member slice (bounded memory for large cohorts).
+        record=json.loads(raw[record_slice[0]:record_slice[1]])
     if canonical(record)!=canonical(json.loads(source[2])): raise ValueError('trace source record mismatch')
     field_bytes=record[token['field']].encode('utf-8')
     selected=field_bytes[token['start_byte']:token['end_byte']].decode('utf-8')
@@ -86,7 +99,87 @@ def trace_rows(db, raw: bytes, manifest: dict, occurrence_id: str, *, verified_m
     return {'token':token,'source_key':source[0],'raw_sha256':manifest['raw_sha256'],'raw_file':'raw','record_locator':source[1],'decoded_field':token['field'],'utf8_span':[token['start_byte'],token['end_byte']],'resolved_raw':selected,'edges':edges,'translations_in_sequence_unaligned':translations,'words':[],'senses':[],'images':[],'rights':manifest['rights'],'rights_attribution':'verified snapshot manifest; not an authenticated license grant' if verified_manifest else 'caller-supplied; not authenticated'}
 
 
-def trace(path: Path, occurrence_id: str) -> dict:
+def trace(path: Path, occurrence_id: str, parent_root: Path | None=None) -> dict:
+    """Verified snapshot trace. Cohort snapshots additionally verify the token inside the parent raw object."""
     manifest=verify(path); db=connect(path)
-    try: return trace_rows(db,(path/'raw').read_bytes(),manifest,occurrence_id,verified_manifest=True)
+    try:
+        raw=(path/'raw').read_bytes()
+        member=None
+        if manifest['source']=='ebl-cohort':
+            locator=db.execute('SELECT r.locator FROM token_context t JOIN source_record r ON r.id=t.source_record_id WHERE t.id=?',[occurrence_id]).fetchone()
+            if locator is None: raise ValueError('unknown occurrence ID')
+            cohort=json.loads((path/'cohort.json').read_text())
+            member=next((m for m in cohort['records'] if m['payload_pointer']==locator[0]),None)
+            if member is None: raise ValueError('occurrence record not bound in cohort manifest')
+        result=trace_rows(db,raw,manifest,occurrence_id,verified_manifest=True,record_slice=(member['payload_start'],member['payload_end']) if member else None)
+        if member: result['parent_trace']=parent_trace(manifest,member,raw,result,parent_root)
+        return result
     finally: db.close()
+
+
+def parent_trace(manifest: dict, member: dict, raw: bytes, result: dict, parent_root: Path | None) -> dict:
+    """Re-read the parent raw object at the recorded byte range and re-resolve the token there."""
+    from .acquire import raw_path, hash_file
+    parent=manifest['cohort']['parent']
+    out={'parent_sha256':parent['sha256'],'parent_receipt_id':parent.get('receipt_id'),'parent_url':parent.get('url'),'parent_pointer':member['parent_pointer'],'parent_byte_range':[member['parent_start'],member['parent_end']],'record_sha256':member['record_sha256']}
+    slice_=raw[member['payload_start']:member['payload_end']]
+    if digest(slice_)!=member['record_sha256']: raise ValueError('cohort member slice mismatch')
+    if parent_root is None: return dict(out,status='parent-raw-not-requested')
+    location=raw_path(parent_root,parent['sha256'])
+    if not location.is_file(): return dict(out,status='parent-raw-unavailable')
+    if hash_file(location)['sha256']!=parent['sha256']: raise ValueError('parent raw integrity failure')
+    with location.open('rb') as handle:
+        handle.seek(member['parent_start']); parent_bytes=handle.read(member['parent_end']-member['parent_start'])
+    if parent_bytes!=slice_: raise ValueError('parent byte range does not match cohort member')
+    field=json.loads(parent_bytes)[result['decoded_field']].encode('utf-8')
+    start,end=result['utf8_span']
+    if field[start:end].decode('utf-8')!=result['resolved_raw']: raise ValueError('parent token round-trip failed')
+    a,b=encoded_field_span(parent_bytes,result['decoded_field'],start,end)
+    fragment=parent_bytes[a:b]
+    if json.loads(b'"'+fragment+b'"')!=result['resolved_raw']: raise ValueError('parent file byte span does not decode to the token')
+    return dict(out,status='verified',resolved_raw_in_parent=result['resolved_raw'],
+                parent_file_byte_span=[member['parent_start']+a,member['parent_start']+b],
+                parent_file_fragment=fragment.decode('utf-8'),
+                span_semantics='half-open byte offsets in the original parent file; they cover the JSON-escaped encoding of the token inside the field string literal (decoding the fragment as JSON string content yields resolved_raw)')
+
+
+_ESCAPES={'"':'"','\\':'\\','/':'/','b':'\b','f':'\f','n':'\n','r':'\r','t':'\t'}
+
+
+def encoded_field_span(raw: bytes, field: str, start: int, end: int) -> tuple[int,int]:
+    """Map a UTF-8 span of a decoded top-level string field to byte offsets inside the encoded JSON record."""
+    text=raw.decode('utf-8'); dec=json.JSONDecoder(); ws=' \t\r\n'; i=0
+    def skip(k):
+        while text[k] in ws: k+=1
+        return k
+    i=skip(i)
+    if text[i]!='{': raise ValueError('record is not a JSON object')
+    i+=1; found=None
+    while True:
+        i=skip(i)
+        if text[i]=='}': break
+        key,i=dec.raw_decode(text,i); i=skip(i)
+        if text[i]!=':': raise ValueError('malformed record')
+        i=skip(i+1); vstart=i; _,i=dec.raw_decode(text,i)
+        if key==field:
+            if found is not None: raise ValueError('duplicate field in record; span ambiguous')
+            found=vstart
+        i=skip(i)
+        if text[i]==',': i+=1
+    if found is None or text[found]!='"': raise ValueError('field is not a string literal')
+    j=found+1; decoded=0; a=None
+    while True:
+        if decoded==start and a is None: a=j
+        if decoded==end and a is not None: b=j; break
+        if decoded>end or text[j]=='"': raise ValueError('span does not fall on encoded character boundaries')
+        if text[j]=='\\':
+            e=text[j+1]
+            if e=='u':
+                cp=int(text[j+2:j+6],16); n=6
+                if 0xD800<=cp<0xDC00 and text[j+6:j+8]=='\\u':
+                    cp=0x10000+((cp-0xD800)<<10)+(int(text[j+8:j+12],16)-0xDC00); n=12
+                ch=chr(cp)
+            else: ch=_ESCAPES[e]; n=2
+        else: ch=text[j]; n=1
+        decoded+=len(ch.encode('utf-8')); j+=n
+    return len(text[:a].encode('utf-8')),len(text[:b].encode('utf-8'))
