@@ -1,8 +1,8 @@
 {
   "atlas_schema": "cuneiform-model-atlas/1",
-  "atlas_revision": 2,
+  "atlas_revision": 4,
   "updated": "2026-11-03",
-  "baseline_commit": "d6049e2",
+  "baseline_commit": "63f4221",
   "canonical_rule": "docs/model-atlas.json is the single canonical machine model. docs/MODEL-ATLAS.md (generated block) and docs/model-atlas.html (embedded data block) are regenerated from it by scripts/check_model_atlas.py --write and drift-checked by --check. Code is the authority for what is implemented; the checker fails when the atlas and code disagree.",
   "versions": {
     "schema": "2",
@@ -483,11 +483,15 @@
       },
       "implementation": {
         "symbols": [
-          "cuneiform/storage.py::materialize",
-          "cuneiform/storage.py::verify",
-          "cuneiform/storage.py::snapshot_identity",
+          "cuneiform/storage.py::StoreEntry",
+          "cuneiform/storage.py::import_cohort",
           "cuneiform/storage.py::import_source",
-          "cuneiform/storage.py::import_cohort"
+          "cuneiform/storage.py::materialize",
+          "cuneiform/storage.py::snapshot_identity",
+          "cuneiform/storage.py::store_entry",
+          "cuneiform/storage.py::verified",
+          "cuneiform/storage.py::verify",
+          "cuneiform/storage.py::verify_content"
         ],
         "manifest_keys_of": "every signed dict carrying snapshot_id in cuneiform/*.py; ** spreads resolved through all call sites (import_source, import_cohort, oracc.import_project, cdli_api.import_artifacts)",
         "files": [
@@ -497,15 +501,16 @@
         ]
       },
       "identity": "New snapshots: snapshot_identity(namespace, source, raw_sha256, schema, parser, record_id, source_url, projection_spec) with contract 'manifest-3' included. The five pilot snapshots predate manifest-3 and keep the legacy formula (their ledger rows record snapshot_contract null). Paths and timestamps are excluded.",
-      "versioning": "Immutable. Published once through the publication ledger (artifact:publication-ledger); a revision gets a new ID. Schema-1 manifests verify under their original inventory contract.",
+      "versioning": "Immutable. Published once through the publication ledger (artifact:publication-ledger); a revision gets a new ID. Schema-1 manifests verify under their original inventory contract. At 63f4221 store membership is decided from the lexical and the resolved parent: a directory in or resolving into a store is ledger-checked, a symlinked or misplaced store entry is refused, and store_path/resolve_snapshot return a StoreEntry read with ledger='require' and its own ID. Copies outside every store stay content-only and labelled standalone-not-ledger-checked. The read contract changed; the manifest keys did not. Accepted at 63f4221 for the authorized local cooperating-writer pilot by the independent final review (reviews/corpus-pilot-review-v0.3.md, review c5df3251): R1-R5 closed. Not proven beyond that scope.",
       "provenance": "manifest_sha256 detects inconsistent edits; it is not authentication against coordinated rewrites.",
       "temporal": "retrieved_or_imported_at is system (ingestion) time in UTC. It is excluded from identity. See temporal:system-time.",
-      "coverage": "Five real pilot snapshots verified read-only on 2026-11-03 by the atlas worker (storage.verify re-hashes every payload file): three published once (eBL∩ccpo cohort c316e7cb, ORACC ccpo edaab55c, CDLI fc7c3504) and two rebuilt under the same ID during the incident (ce127437, 84971360). Their counts are evidence of rows, not of publication integrity.",
+      "coverage": "Six real snapshots in the store: four accepted as evidence (eBL∩ccpo cohort c316e7cb, ORACC ccpo edaab55c, CDLI fc7c3504, and the oracc-cdl-2 rebuild 5e51403b, accepted by v0.3), two rebuilt under the same ID during the incident (ce127437, 84971360). See corpus_snapshots. Counts are evidence of rows; publication integrity is the ledger's pilot-scope guarantee.",
       "fields": [
         {
           "name": "snapshot_contract",
           "type": "string",
-          "note": "'manifest-3'; part of new snapshot IDs. Absent from the five pilot manifests (legacy identity)."
+          "note": "'manifest-3'; part of new snapshot IDs. Absent from the five pilot manifests (legacy identity); legacy_absent lets the runtime check accept that.",
+          "legacy_absent": true
         },
         {
           "name": "projection_spec",
@@ -555,7 +560,7 @@
             "cdli-selection",
             "oracc-selection"
           ],
-          "note": "Adapter contract, e.g. oracc-cdl-1, cdli-artifact-json-1."
+          "note": "Adapter contract, e.g. oracc-cdl-1 (edaab55c), oracc-cdl-2 (94af111 and later: sense-key locators, per-occurrence sig on IN_SENSE), cdli-artifact-json-1."
         },
         {
           "name": "cohort",
@@ -660,6 +665,11 @@
         "Q-005"
       ],
       "verified_by": [
+        "review-v03-disk-63f4221",
+        "q021-disk-63f4221",
+        "backend-q022-disk-63f4221",
+        "q020-disk-94af111",
+        "backend-fix-disk-94af111",
         "corpus-worker-disk-d6049e2",
         "parent-full-disk-2ab620b"
       ]
@@ -669,7 +679,7 @@
       "kind": "artifact",
       "domain": "provenance",
       "label": "Snapshot publication ledger (.publication-ledger.jsonl)",
-      "summary": "Append-only ledger under an exclusive lock. An ID that was ever published can never be published again, even after deletion. Published trees are made read-only (files 0444, directories 0555).",
+      "summary": "Append-only publication ledger under an exclusive lock (cuneiform/publication.py, format 2). Writers fsync a `reserve` (binding manifest_sha256 and the manifest.json bytes) before the rename, then a `commit`; interrupted publications fail closed until an explicit publication-recover. Guarantee: an ID that was ever published is never served or published with other bytes, for cooperating writers on one host. Accepted at 63f4221 for the authorized local cooperating-writer pilot by the independent final review (reviews/corpus-pilot-review-v0.3.md, review c5df3251): R1-R5 closed. Not proven beyond that scope.",
       "status": {
         "modeled": "documented",
         "implemented": "code",
@@ -678,29 +688,75 @@
       },
       "implementation": {
         "symbols": [
+          "cuneiform/publication.py::LEDGER",
+          "cuneiform/publication.py::Ledger",
+          "cuneiform/publication.py::PublicationError",
+          "cuneiform/publication.py::adopt",
+          "cuneiform/publication.py::build_lock",
+          "cuneiform/publication.py::check_published",
+          "cuneiform/publication.py::locate_entry",
+          "cuneiform/publication.py::missing_entry",
+          "cuneiform/publication.py::publish_dir",
+          "cuneiform/publication.py::recover",
+          "cuneiform/storage.py::LEDGER",
+          "cuneiform/storage.py::StoreEntry",
+          "cuneiform/storage.py::existing_snapshot",
           "cuneiform/storage.py::publish",
-          "cuneiform/storage.py::assert_unpublished",
-          "cuneiform/storage.py::LEDGER"
+          "cuneiform/storage.py::resolve_snapshot",
+          "cuneiform/storage.py::store_entry",
+          "cuneiform/storage.py::store_path",
+          "cuneiform/storage.py::verified"
         ],
         "files": [
-          "cuneiform/storage.py"
+          "cuneiform/publication.py",
+          "cuneiform/storage.py",
+          "cuneiform/corpus.py",
+          "docs/PUBLICATION-PROTOCOL.md"
         ]
       },
-      "provenance": "Added after the same-ID rebuild incident (UI review F-4): at ~09:44Z on 2026-11-03 snapshots ce127437 and 84971360 were published, deleted at ~09:46Z and rebuilt under the same IDs. First-version bytes were not retained. Incident record: ~/.local/share/cuneiform-research/evidence/incident-2026-11-03-same-id-rebuild.json.",
-      "coverage": "Five rows, all backfilled at ~09:59Z; the two rebuilt snapshots carry an incident note. Read back by the atlas worker. Rows are file entries, not table rows, so populated stays none.",
-      "uncertainty": "The safeguards (ledger refusal, read-only trees, manifest-3 identity) are tested only by a disk-gated test that the implementer ran. They need independent review (Q-005) before they count as verified. The pre-incident bytes of the two rebuilt snapshots are unrecoverable.",
+      "provenance": "Added after the same-ID rebuild incident (UI review F-4): at ~09:44Z on 2026-11-03 snapshots ce127437 and 84971360 were published, deleted at ~09:46Z and rebuilt under the same IDs. First-version bytes were not retained, and no copy of them is known. Incident record: ~/.local/share/cuneiform-research/evidence/incident-2026-11-03-same-id-rebuild.json. Both IDs are kept and listed as incident in corpus_snapshots; they are never evidence.",
+      "coverage": "Seven rows at 63f4221 (read by the atlas worker; ledger SHA-256 6d359b74… is unchanged since 94af111): five legacy rows backfilled at ~09:59Z (two carry the incident note) and one reserve plus one commit for snapshot:5e51403b at 10:36:22Z. Readers label the five ledgered-legacy-backfilled; their published_at is the manifest build time copied by the backfill, and their manifest.json file bytes are not bound (canonical digest only). derived/cohorts has no ledger or lock yet: its three cohorts read as unledgered-pre-ledger-cohort-store. Building any new cohort there creates the cohort ledger, after which those three are refused until the owner adopts them (writer statement, not done). Rows are file entries, not table rows, so populated stays none.",
+      "uncertainty": "Q-005 blockers at d6049e2: B1 crash window after the rename allowed a same-ID republish; B2 reads never consulted the ledger; B3 failed-publish cleanup masked the error. Q-020 (reviews/corpus-pilot-review-v0.2.md) closed B1 and B3 at 94af111 and kept B2 open on its R1 (a symlinked store entry served as standalone-not-ledger-checked), with R2 (cohort reads), R3 (reserve->commit window), R4 (untyped absent entries) and R5 (seal fsync order). Accepted at 63f4221 for the authorized local cooperating-writer pilot by the independent final review (reviews/corpus-pilot-review-v0.3.md, review c5df3251): R1-R5 closed. Not proven beyond that scope. Writer changes: store membership from the lexical and resolved parent; symlinked or escaping entries, payload symlinks and misplaced IDs refused with symlinked-entry or misplaced before hashing; StoreEntry reads always ledger=require with expected_sid; a writer that finds reserved waits on the per-ID build lock; typed refusals for absent entries; seal fsyncs after the final modes. fsync_dir still ignores OSError. Limits stated by the protocol: cooperating writers on one host; same-owner edits, ledger deletion and root are not prevented; symlink checks are time-of-read; the ledger is not a signature. Open, non-blocking (v0.3 §9): N1 a reader refusal inside a live reserve window says the writer is gone (wording; the read still fails closed); N2 API cohort reads default to auto and label pre-ledger cohorts standalone (wording); N3 publication-clean-stage is guarded by age only. Not tested: same-owner tampering, root, multi-host, real power loss (crashes are process kills).",
       "verified_by": [
+        "review-v03-disk-63f4221",
+        "q021-disk-63f4221",
+        "backend-q022-disk-63f4221",
+        "q020-disk-94af111",
+        "backend-fix-disk-94af111",
         "corpus-worker-disk-d6049e2"
       ],
       "evidence": [
-        "tests/test_corpus_pilot.py::test_ledger_read_only_and_contract_identity"
+        "tests/test_publication.py::test_kill_after_rename_fails_closed_then_delete_cannot_republish",
+        "tests/test_publication.py::test_replaced_build_refused_restoration_bound_standalone_labelled",
+        "tests/test_publication.py::test_rename_failure_raises_original_error_and_leaves_no_stage",
+        "tests/test_publication.py::test_states_and_conflicts",
+        "tests/test_corpus_pilot.py::test_ledger_read_only_and_contract_identity",
+        "tests/test_store_reads.py::test_symlinked_entry_same_id_different_bytes_refused_everywhere",
+        "tests/test_store_reads.py::test_id_x_never_resolves_to_snapshot_y",
+        "tests/test_store_reads.py::test_nested_path_forms",
+        "tests/test_store_reads.py::test_dangling_symlink_and_symlinked_dest_on_writer_and_recovery_side",
+        "tests/test_store_reads.py::test_absent_entry_refusals_are_typed",
+        "tests/test_store_reads.py::test_writer_and_recovery_inside_live_reserve_commit_window",
+        "tests/test_store_reads.py::test_seal_fsyncs_after_final_modes"
       ],
       "sources": [
-        "CHECKPOINT.md"
+        "CHECKPOINT.md",
+        "docs/PUBLICATION-PROTOCOL.md",
+        "docs/CORPUS-REVIEW-v0.1-DISPOSITION.md",
+        "docs/CORPUS-REVIEW-v0.2-DISPOSITION.md",
+        "reviews/corpus-pilot-review-v0.3.md"
       ],
       "queue": [
         "Q-001",
-        "Q-005"
+        "Q-005",
+        "Q-020",
+        "Q-022"
+      ],
+      "versioning": "Format 1: legacy rows with no event key (the d6049e2 publisher and the 2026-11-03 backfill of the five pilot snapshots), read as published. Format 2 (94af111): reserve, commit, abort, abandon, adopt and torn-tail-acknowledged events; 63f4221 adds no event kind. The cohort ledger under derived/cohorts uses the same format, reached through publication-* --store cohorts. Historical rows are never rewritten. The checker reads both formats itself (corpus-evidence-reader-1).",
+      "reviewed_by": [
+        "reviews/corpus-pilot-review-v0.1.md",
+        "reviews/corpus-pilot-review-v0.2.md",
+        "reviews/corpus-pilot-review-v0.3.md"
       ]
     },
     {
@@ -753,28 +809,46 @@
       "implementation": {
         "symbols": [
           "cuneiform/corpus.py::build_cohort",
+          "cuneiform/corpus.py::iter_array",
           "cuneiform/corpus.py::verify_cohort",
-          "cuneiform/corpus.py::iter_array"
+          "cuneiform/storage.py::import_cohort"
         ],
         "files": [
-          "cuneiform/corpus.py"
+          "cuneiform/corpus.py",
+          "cuneiform/publication.py"
         ]
       },
       "scope": "A cohort is a filtered, hash-ordered sample (20,896 of 23,289 records eligible), not representative corpus statistics.",
-      "coverage": "Three cohorts: 30, 300 and the 51-record eBL∩ccpo P-number cohort (SOURCE-AUDIT).",
+      "coverage": "Three cohorts: 30, 300 and the 51-record eBL∩ccpo P-number cohort (SOURCE-AUDIT). They predate the cohort ledger: derived/cohorts has no ledger or lock, so reads label them unledgered-pre-ledger-cohort-store (ledger='store') and require-mode reads refuse them. New cohorts are ledgered there and sealed read-only.",
       "verified_by": [
+        "review-v03-disk-63f4221",
+        "q021-disk-63f4221",
+        "backend-q022-disk-63f4221",
+        "q020-disk-94af111",
+        "backend-fix-disk-94af111",
         "corpus-worker-disk-d6049e2"
       ],
       "evidence": [
         "tests/test_corpus_pilot.py::test_cohort_determinism_prefix_trace_tamper_and_chunked_parity",
-        "tests/test_corpus_pilot.py::test_exact_byte_ranges_across_tiny_chunks_and_envelopes"
+        "tests/test_corpus_pilot.py::test_exact_byte_ranges_across_tiny_chunks_and_envelopes",
+        "tests/test_store_reads.py::test_kill_after_rename_cohort_refused_then_recovered_with_byte_binding",
+        "tests/test_store_reads.py::test_kill_after_reserve_cohort_complete_and_discard",
+        "tests/test_store_reads.py::test_unrecorded_symlinked_misplaced_and_pre_ledger_cohorts",
+        "tests/test_store_reads.py::test_concurrent_cohort_builders_build_once"
       ],
       "sources": [
-        "docs/SOURCE-AUDIT.md"
+        "docs/SOURCE-AUDIT.md",
+        "docs/CORPUS-REVIEW-v0.2-DISPOSITION.md"
       ],
       "queue": [
         "Q-005",
-        "Q-012"
+        "Q-012",
+        "Q-020",
+        "Q-022"
+      ],
+      "uncertainty": "Q-020 R2 (cohort reads not ledger-bound, no cohort recovery path). At 63f4221 the writer made verify_cohort(dir, parent, ledger=auto|store|require|skip) ledger-checked; corpus-audit and corpus-import read with ledger='store', import_cohort checks before building, build_cohort holds a per-ID build lock, and publication-* --store cohorts is the explicit recovery and adoption path. Accepted at 63f4221 for the authorized local cooperating-writer pilot by the independent final review (reviews/corpus-pilot-review-v0.3.md, review c5df3251): R1-R5 closed. Not proven beyond that scope. Each snapshot binds its own cohort.json by hash, which remains the authoritative copy. Prerequisite before any future cohort build in the real store: the owner must explicitly adopt cohort-4e86952e…, cohort-9abad6ce… and cohort-ea91baae… (publication-adopt --store cohorts). A build creates the cohort ledger, after which unadopted cohorts are refused. Not done; no cohort was built (v0.3 §7, §11; parent).",
+      "reviewed_by": [
+        "reviews/corpus-pilot-review-v0.3.md"
       ]
     },
     {
@@ -842,8 +916,27 @@
           "sources/rights/ebl-zenodo-10018951.json"
         ],
         "rights_sources": {
-          "oracc-selection": "Per-snapshot statement written by oracc.import_project: each ccpo file states 'released under the CC0 license'; the documentation footer says CC BY-SA 3.0. Recorded, not legally reviewed.",
-          "cdli-selection": "Per-snapshot statement cdli_api.RIGHTS: cdli.earth Terms of Use (academic reuse of transliterations and translations with attribution; images non-commercial). Catalog metadata not separately licensed. Not legally reviewed."
+          "cdli-selection": {
+            "note": "Per-snapshot statement cdli_api.RIGHTS: cdli.earth Terms of Use (academic reuse of transliterations and translations with attribution; images non-commercial). Catalog metadata not separately licensed. Not legally reviewed.",
+            "statement_sha256": "c07f1842381d30b04d14bbf26465509f264bdfb3756ed0c8fd51e746ce7f869b"
+          },
+          "ebl-cohort": {
+            "note": "Per-snapshot statement written by storage.import_cohort: the cohort manifest's rights (copied from the parent receipt) or, if absent, RIGHTS['ebl']. The five pilot cohort manifests carry unresolved-conflict. Recorded, not legally reviewed. Hash moved at 63f4221 (was 84c9938a…) only because the fingerprinted binding of cohort became verify_cohort(cohort_dir, parent_path, ledger=cohort_ledger); the rights expression and every literal it reads are unchanged (AST text compared at 94af111 and 63f4221 by the atlas worker). No grant widened.",
+            "statement_sha256": "7e724f40577196aa4c479fcb4935478a99d8e094b4c6e92e33fb6d3d02b814bd"
+          },
+          "oracc-selection": {
+            "note": "Per-snapshot statement written by oracc.import_project: each ccpo file states 'released under the CC0 license'; the documentation footer says CC BY-SA 3.0. Recorded, not legally reviewed.",
+            "statement_sha256": "5183e6119f1206792ca8ba9c298fc741b353e260446e9af6166cb02342d59368"
+          }
+        },
+        "rights_status": {
+          "ebl": "unresolved-conflict",
+          "ebl-atf": "unknown",
+          "cdli": "unknown",
+          "oracc": "unverified-project",
+          "ebl-cohort": "unresolved-conflict",
+          "oracc-selection": "source-stated",
+          "cdli-selection": "source-stated-terms"
         }
       },
       "values": {
@@ -2728,11 +2821,13 @@
       },
       "implementation": {
         "symbols": [
-          "cuneiform/projections.py::lookup",
-          "cuneiform/projections.py::source_span",
+          "cuneiform/persisted.py::LayerUnavailable",
+          "cuneiform/persisted.py::ScopeMismatch",
+          "cuneiform/persisted.py::lookup_snapshot",
           "cuneiform/projections.py::coverage",
+          "cuneiform/projections.py::lookup",
           "cuneiform/projections.py::report",
-          "cuneiform/persisted.py::lookup_snapshot"
+          "cuneiform/projections.py::source_span"
         ],
         "files": [
           "cuneiform/projections.py",
@@ -2743,7 +2838,8 @@
       "evidence": [
         "tests/test_projections.py::test_trace_and_reverse_navigation",
         "tests/test_projections.py::test_caps_configuration_and_atomic_failure",
-        "tests/test_corpus_pilot.py::test_words_lemmas_senses_and_claims_without_invented_translation"
+        "tests/test_corpus_pilot.py::test_words_lemmas_senses_and_claims_without_invented_translation",
+        "tests/test_publication.py::test_lookup_verifies_once_labels_latency_and_types_errors"
       ],
       "sources": [
         "docs/REPRESENTATION-MAP.md"
@@ -2753,7 +2849,7 @@
         "Q-010",
         "Q-005"
       ],
-      "notes": "Candidate backing for MCP read tools and the UI."
+      "notes": "Candidate backing for MCP read tools and the UI. Since 94af111: persisted.ScopeMismatch for a namespace/snapshot override that cannot match; persisted.LayerUnavailable when the layer table is empty (an empty table means the layer is unavailable, never zero); a loaded layer with no match returns rows []. Each call verifies the snapshot once; latency_ms is query-only (latency_scope) and timing adds verify_ms, query_ms and end_to_end_ms. At 63f4221 lookup_snapshot, query.connect and query.trace refuse a symlinked store entry (symlinked-entry) on both the plain path and the StoreEntry (writer-tested)."
     },
     {
       "id": "query:trace",
@@ -2790,7 +2886,8 @@
       "queue": [
         "Q-010",
         "Q-005"
-      ]
+      ],
+      "notes": "Since 94af111 a trace returns timing (and parent_trace_ms for cohorts) and the publication label of the snapshot it read."
     },
     {
       "id": "value:snapshot-scope",
@@ -2812,7 +2909,7 @@
           "cuneiform/persisted.py"
         ]
       },
-      "notes": "Derived from the manifest, not rows. For the 300 cohort: 'rule-selected cohort', 300 of 20,896 eligible, 23,289 parent records.",
+      "notes": "Derived from the manifest, not rows. For the 300 cohort: 'rule-selected cohort', 300 of 20,896 eligible, 23,289 parent records. Since 94af111 scope also reports publication (the ledger label), identity_formula and input_identity (the contract-independent legacy-formula ID of the inputs, for grouping a legacy snapshot with a manifest-3 rebuild without merging them; ORACC pairs differ because the adapter is part of the selection ID).",
       "evidence": [
         "tests/test_corpus_pilot.py::test_snapshots_verify_parity_and_traces"
       ],
@@ -3128,7 +3225,8 @@
           "observed": "2026-11-03"
         }
       ],
-      "coverage": "ORACC ccpo: 1,122 lemmas from 4,544 lemmatized word instances."
+      "coverage": "ORACC ccpo: 1,122 lemmas from 4,544 lemmatized word instances.",
+      "notes": "Lemma.source_record_id still points at the first attesting text (schema NOT NULL, no project-level record); deferred schema change per Q-005 F4. Corpus evidence is snapshot:edaab55c (oracc-cdl-1, written by d6049e2); its counts are valid, but it is superseded by the accepted oracc-cdl-2 rebuild snapshot:5e51403b for sense provenance (same counts per Q-020; accepted by v0.3)."
     },
     {
       "id": "edge:LEMMATIZED_AS",
@@ -3252,7 +3350,9 @@
         }
       ],
       "identity": "identity('sense', lemma_id, sense string).",
-      "coverage": "ORACC ccpo: 1,317 senses."
+      "coverage": "ORACC ccpo: 1,317 senses.",
+      "provenance": "oracc-cdl-1 (edaab55c) put an instance sig in source_locator for 1,309 shared Sense rows (Q-005 F4). oracc-cdl-2 (94af111) uses a sense-key locator (project, lemma key, sense) and a labelled first-attestation pointer, never an instance sig; per-occurrence sigs are on edge:IN_SENSE.",
+      "notes": "Corpus evidence is snapshot:edaab55c (oracc-cdl-1, written by d6049e2); its counts are valid, but it is superseded by the accepted oracc-cdl-2 rebuild snapshot:5e51403b for sense provenance (same counts per Q-020; accepted by v0.3)."
     },
     {
       "id": "edge:HAS_SENSE",
@@ -3277,7 +3377,9 @@
         "source": "node:Lemma",
         "target": "node:Sense",
         "cardinality": "1:N",
-        "qualification": []
+        "qualification": [
+          "attribution"
+        ]
       },
       "sources": [
         "SPEC-v0.2.md §5"
@@ -3297,7 +3399,9 @@
           "observer": "Q-007/Q-018 atlas worker (read-only storage.verify + manifest counts / exported edge Parquet)",
           "observed": "2026-11-03"
         }
-      ]
+      ],
+      "provenance": "Since oracc-cdl-2 the edge carries an attribution note: its source_record_id still names the first attesting text, because the schema has no project-level record (deferred schema change, Q-005 F4).",
+      "notes": "Corpus evidence is snapshot:edaab55c (oracc-cdl-1, written by d6049e2); its counts are valid, but it is superseded by the accepted oracc-cdl-2 rebuild snapshot:5e51403b for sense provenance (same counts per Q-020; accepted by v0.3)."
     },
     {
       "id": "edge:IN_SENSE",
@@ -3323,10 +3427,13 @@
         "target": "node:Sense",
         "cardinality": "N:1 (each lemmatized word points at exactly its own sense)",
         "qualification": [
-          "basis"
+          "basis",
+          "inst",
+          "payload_pointer",
+          "sig"
         ]
       },
-      "provenance": "Explicit per-instance source assertion; basis states that it is a gloss, not a translation.",
+      "provenance": "Explicit per-instance source assertion. basis states that it is a gloss, not a translation. Since oracc-cdl-2 (94af111) each edge also carries the occurrence's own ORACC sig, inst and payload_pointer, so the instance signature lives on the occurrence, not on the shared Sense row (Q-005 F4).",
       "evidence": [
         "tests/test_corpus_pilot.py::test_words_lemmas_senses_and_claims_without_invented_translation",
         "tests/test_corpus_pilot.py::test_snapshots_verify_parity_and_traces"
@@ -3347,7 +3454,8 @@
           "observer": "Q-007/Q-018 atlas worker (read-only storage.verify + manifest counts / exported edge Parquet)",
           "observed": "2026-11-03"
         }
-      ]
+      ],
+      "notes": "Corpus evidence is snapshot:edaab55c (oracc-cdl-1, written by d6049e2); its counts are valid, but it is superseded by the accepted oracc-cdl-2 rebuild snapshot:5e51403b for sense provenance (same counts per Q-020; accepted by v0.3). Q-020 checked all 4,544 IN_SENSE edges of 5e51403b against the raw nodes (0 mismatches)."
     },
     {
       "id": "node:TranslationSegment",
@@ -3932,6 +4040,11 @@
       ],
       "notes": "Manifest value, not rows. Disk level rests on the corpus worker's UNVERIFIED d6049e2 run (historically the parent's 2ab620b run).",
       "verified_by": [
+        "review-v03-disk-63f4221",
+        "q021-disk-63f4221",
+        "backend-q022-disk-63f4221",
+        "q020-disk-94af111",
+        "backend-fix-disk-94af111",
         "corpus-worker-disk-d6049e2",
         "parent-full-disk-2ab620b"
       ]
@@ -4137,7 +4250,7 @@
       "kind": "facet",
       "domain": "temporal",
       "label": "Observed CDLI temporal fields (raw only)",
-      "summary": "Retained CSV headers: period, period_remarks, date_of_origin, dates_referenced, alternative_years, accounting_period, publication_date, publication_history, date_entered, date_updated, acquisition_history, excavation_no.",
+      "summary": "Persisted CDLI artifact JSON (cdli-selection, snapshot:fc7c3504, 51 records): period is an object {id, name, period, sequence, time_range} or null; dates is a list; dates_referenced is a string or null. The earlier retained CSV sample has the headers period, period_remarks, date_of_origin, dates_referenced, alternative_years, accounting_period, publication_date, publication_history, date_entered, date_updated, acquisition_history and excavation_no.",
       "status": {
         "modeled": "documented",
         "implemented": "none",
@@ -4147,8 +4260,8 @@
       "implementation": {
         "table": null
       },
-      "raw_retained_in": "artifact.metadata / source_record.raw_json for CDLI rows",
-      "notes": "Value shapes seen in three retained rows: period 'Uruk III (ca. 3200-3000 BC)' (label + source-attributed approximate BC range); date_of_origin / dates_referenced '00.00.00.00' (sentinel = unknown) or empty; publication_date '1993' or '2015ff.' (open end); date_entered '12/4/2001' (US-style system date); date_updated ISO '2020-03-14'. These are catalog assertions, not verified dates.",
+      "raw_retained_in": "source_record.raw_json (JSON object per artifact) and artifact.metadata",
+      "notes": "Observed in fc7c3504 (structure read from copies by the atlas worker, nothing parsed): period present in 41 of 51 and null in 10, e.g. name 'Neo-Assyrian', period 'Neo-Assyrian (ca. 911-612 BC)', time_range 'ca. 911-612 BC' (label plus a source-attributed approximate range); dates is [] in all 51; dates_referenced is null in 50 and a regnal-style string 'Artaxerxes.19.11.23' in 1, which is not interpreted. accession_no values such as '1883-01-18, 0722' are museum registration numbers, not dates. CSV sample shapes (three retained rows): date_of_origin '00.00.00.00' (sentinel = unknown) or empty, publication_date '1993' or '2015ff.' (open end), date_entered '12/4/2001', date_updated '2020-03-14'. All are catalog assertions, not verified dates.",
       "sources": [
         "docs/INGESTION-DESIGN.md"
       ],
@@ -4162,7 +4275,7 @@
       "kind": "facet",
       "domain": "temporal",
       "label": "Observed eBL temporal fields (raw only)",
-      "summary": "Retained K.1 record has script.period, script.periodModifier, archaeology.date, archaeology.findspot.date and references[].document.issued.date-parts (publication years).",
+      "summary": "Persisted eBL fragment JSON (ebl-cohort, snapshot:c316e7cb, 51 records): script is {period, periodModifier, sortKey, uncertain}; date and datesInText are present as fields; record is a list of {date, type, user} edit events. The retained K.1 sample also has archaeology.date, archaeology.findspot.date and references[].document.issued.date-parts.",
       "status": {
         "modeled": "documented",
         "implemented": "none",
@@ -4173,7 +4286,7 @@
         "table": null
       },
       "raw_retained_in": "artifact.metadata / source_record.raw_json for eBL records",
-      "notes": "Observed: script.period 'Neo-Babylonian' with periodModifier 'None'; archaeology.date null; findspot.date null; reference issued years numeric. Script period is a paleographic attribution, not an absolute date.",
+      "notes": "Observed in c316e7cb (structure only): script.period 'Neo-Assyrian' 24, 'Neo-Babylonian' 20, 'Late Babylonian' 3 and two other values; periodModifier 'None' in all 51; uncertain is a boolean. date is null and datesInText is [] in all 51; no archaeology object. record holds 374 eBL editorial events (ISO timestamps of edits): system/editorial time of the source, never an ancient date. Script period is a paleographic attribution, not an absolute date. Q-015 should be scoped against these JSON shapes.",
       "sources": [
         "docs/INGESTION-DESIGN.md"
       ],
@@ -4782,7 +4895,7 @@
       "kind": "service",
       "domain": "interfaces",
       "label": "FalkorDB graph projection (isolated)",
-      "summary": "Disposable graph rebuilt from contract:portable-graph-export for traversals. Not implemented in this repository. A separate isolated FalkorDB instance runs for the sibling UI (cuneiform-ui 567ea14, Browser on :23001); whether it replaces this planned projection or stays a separate consumer is a Q-008/Q-009 decision.",
+      "summary": "Disposable graph rebuilt from contract:portable-graph-export for traversals. Not implemented in this repository. The sibling UI runs its own isolated, authenticated FalkorDB (cuneiform-ui ca4b514) behind bounded query templates, with the Browser on :23001 and freeform Cypher disabled. Whether it replaces this planned projection or stays a separate consumer is a Q-008/Q-009 decision.",
       "status": {
         "modeled": "specified",
         "implemented": "none",
@@ -4800,7 +4913,7 @@
         "Q-009",
         "Q-008"
       ],
-      "notes": "The sibling instance is delivered but not independently verified (UI review bc133950, fixes by b13b7efc)."
+      "notes": "The sibling instance is pilot-usable per the UI re-review (reviews/ui-review-v0.2.md in the sibling); nothing here is verified."
     },
     {
       "id": "service:mcp-read-slice",
@@ -4829,7 +4942,7 @@
       "kind": "interface",
       "domain": "interfaces",
       "label": "CLI (python -m cuneiform)",
-      "summary": "python -m cuneiform: demo, explore, fetch, acquire, receipts, corpus-inspect, corpus-select, corpus-audit, corpus-import, snapshots, scope, manifest, lookup, query, parity, trace, trace-word, export-graph, catalog-link, cdli-import, oracc-inspect, oracc-import.",
+      "summary": "python -m cuneiform: demo, explore, fetch, acquire, receipts, corpus-inspect, corpus-select, corpus-audit, corpus-import, snapshots, publication-status, publication-recover, publication-adopt, publication-repair-ledger, publication-clean-stage, scope, manifest, lookup, query, parity, trace, trace-word, export-graph, catalog-link, cdli-import, oracc-inspect, oracc-import.",
       "status": {
         "modeled": "documented",
         "implemented": "code",
@@ -4852,15 +4965,18 @@
         "docs/REPRESENTATION-MAP.md"
       ],
       "queue": [
-        "Q-005"
-      ]
+        "Q-005",
+        "Q-020",
+        "Q-022"
+      ],
+      "notes": "Read verbs resolve snapshots through storage.store_path, which at 63f4221 returns a ledger-required StoreEntry and refuses symlinked or misplaced entries (exit 2, writer-tested). The publication-* verbs are the only recovery path; nothing is automatic (docs/PUBLICATION-PROTOCOL.md). Since 63f4221 they take --store {snapshots,cohorts}; publication-status adds store, symlinked_entries and a per-row id; corpus-audit JSON adds publication. Verb list read from cuneiform/cli.py at 63f4221 by the atlas worker (unchanged from 94af111)."
     },
     {
       "id": "interface:ui",
       "kind": "interface",
       "domain": "interfaces",
       "label": "Research UI (sibling cuneiform-ui)",
-      "summary": "Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui, with its own isolated FalkorDB projection. Delivered; not independently verified.",
+      "summary": "Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui, with an isolated, authenticated FalkorDB behind bounded query templates. Pilot-usable against the pinned backend d6049e2 (re-review 05cfcd7b at ca4b514); polish commit 30f1f45 delivered, not yet re-reviewed. Not accepted end-to-end.",
       "status": {
         "modeled": "documented",
         "implemented": "code",
@@ -4870,12 +4986,12 @@
       "implementation": {
         "external": {
           "repo": "../cuneiform-ui",
-          "commit": "567ea14",
-          "observed": "HTTP 200 on 127.0.0.1:8740 (UI) and :23001 (FalkorDB Browser) reported by the parent and the Q-004 reviewer; not re-probed by the atlas worker. The sibling checkout has uncommitted fixes from UI fix worker b13b7efc.",
-          "review": "UI review bc133950 reported findings (F-4 is cited in CHECKPOINT.md); fixes in progress; nothing verified."
+          "commit": "30f1f45",
+          "observed": "30f1f45 \"Fix UI review v0.2 N-1, N-3..N-7; prepare ledger format 2 (pin unchanged)\" exists in the sibling (git, read by the atlas worker). Writer-reported, UNVERIFIED: 37/37 unit tests and 24 read-only isolation checks, stable browser refresh. Backend pin still d6049e2. Earlier, at ca4b514, re-review 05cfcd7b observed the workbench on 127.0.0.1:8740, the FalkorDB Browser (:23001) and freeform Cypher disabled, and 24/24 UI tests OK.",
+          "review": "Re-review 05cfcd7b (sibling reviews/ui-review-v0.2.md) verified all 19 v0.1 findings fixed at ca4b514 for pilot scope and raised N-1 to N-7. Polish task 126fb290 (30f1f45) dispositioned N-1 and N-3 to N-7, and prepared N-2. The final publication review (reviews/corpus-pilot-review-v0.3.md) allows the UI to re-pin from d6049e2 to 63f4221; the parent is dispatching that re-pin. Integration is pending until its result. The combined re-pin and integration review must include a fresh residual review of 30f1f45 and check the torn-ledger handling against the backend: readers tolerate only an unparseable unterminated final record, still refuse any ID whose reservation is not committed, and refuse an unparseable middle record."
         }
       },
-      "notes": "This checker resolves files under this repository only, so the UI is cited by commit. It must consume the read-only lookup/trace surface and these model IDs; the integration contract is Q-008.",
+      "notes": "This checker resolves files under this repository only, so the UI is cited by commit. It consumes the read-only lookup/trace surface and these model IDs (Q-008). Still pinned to d6049e2 semantics. For the re-pin (v0.3 §11): read store entries through resolve_snapshot/store_path or verified(path, ledger='require'); handle PublicationError states symlinked-entry, misplaced, not-found, reserved, published-missing and abandoned; treat a reader's reserved as not yet available (N1); use ledger='store' for cohort reads (N2); label edaab55c as superseded by 5e51403b for sense provenance.",
       "sources": [
         "QUEUE.md",
         "reviews/atlas-review-v0.1.md"
@@ -4947,11 +5063,170 @@
       "command": "<venv>/python -B -m unittest discover -s tests (clean git archive export of d6049e2 at 10:10Z)",
       "result": "Ran 43 tests in 14.340s, OK (skipped=5: four corpus disk tests incl. the publication-ledger test, and the snapshot disk test)",
       "attribution": "Own observation. Unit level only; it reads the five real snapshots read-only in test_snapshots_verify_parity_and_traces."
+    },
+    {
+      "id": "q005-reviewer-disk-d6049e2",
+      "level": "disk",
+      "outcome": "pass",
+      "observer": "Q-005 corpus reviewer (independent of the corpus worker)",
+      "read_back": true,
+      "date": "2026-11-03",
+      "code_ref": "d6049e2",
+      "command": "CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests",
+      "result": "Ran 43 tests in 16.007s, OK (in-memory run: 13.174s, OK, skipped=5)",
+      "attribution": "Recorded in reviews/corpus-pilot-review-v0.1.md by its independent reviewer; accepted by the parent as independent evidence for d6049e2 (Q-019 S4). Not re-run by the atlas worker. Historical once the baseline moved to 94af111."
+    },
+    {
+      "id": "backend-fix-disk-94af111",
+      "level": "disk",
+      "outcome": "pass",
+      "observer": "Backend fix worker, task 44ddaeb1 (Q-001 fix round)",
+      "read_back": false,
+      "date": "2026-11-03",
+      "code_ref": "94af111",
+      "command": "CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests",
+      "result": "Ran 59 tests, OK (in-memory: 59, OK, skipped=17)",
+      "attribution": "UNVERIFIED as a claimant report: CHECKPOINT.md and docs/CORPUS-REVIEW-v0.1-DISPOSITION.md at 94af111."
+    },
+    {
+      "id": "q020-disk-94af111",
+      "level": "disk",
+      "outcome": "pass",
+      "observer": "Q-020 review sub-agent (independent of fix task 44ddaeb1)",
+      "read_back": true,
+      "date": "2026-11-03",
+      "code_ref": "94af111",
+      "command": "CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests -v (live checkout at 94af111; only QUEUE.md modified)",
+      "result": "Ran 59 tests in 30.048s, OK, 0 skipped",
+      "attribution": "Recorded in reviews/corpus-pilot-review-v0.2.md by the independent reviewer; recorded with read_back true on the parent's instruction. The same review keeps Q-005 B2 open (its R1), so this run is test evidence, not acceptance."
+    },
+    {
+      "id": "q021-inmemory-94af111",
+      "level": "unit",
+      "outcome": "pass",
+      "observer": "Atlas repair worker (Q-021)",
+      "read_back": true,
+      "date": "2026-11-03",
+      "code_ref": "94af111",
+      "command": "<venv>/python -B -m unittest discover -s tests (clean git archive export of 94af111 at 11:02Z)",
+      "result": "Ran 59 tests in 14.890s, OK (skipped=17)",
+      "attribution": "Own observation."
+    },
+    {
+      "id": "backend-q022-disk-63f4221",
+      "level": "disk",
+      "outcome": "pass",
+      "observer": "Q-022 backend fix worker (Q-020 R1-R5 round)",
+      "read_back": false,
+      "date": "2026-11-03",
+      "code_ref": "63f4221",
+      "command": "CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests (forward and reversed order)",
+      "result": "Ran 70 tests, OK (59 + 11 new in tests/test_store_reads.py); 11/11 new fail on a 94af111 export",
+      "attribution": "UNVERIFIED as a claimant report: commit message of 63f4221 and docs/CORPUS-REVIEW-v0.2-DISPOSITION.md."
+    },
+    {
+      "id": "q021-disk-63f4221",
+      "level": "disk",
+      "outcome": "pass",
+      "observer": "Atlas repair worker (Q-021)",
+      "read_back": true,
+      "date": "2026-11-03",
+      "code_ref": "63f4221",
+      "command": "CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests (clean git archive export of 63f4221)",
+      "result": "Ran 70 tests in 40.735s, OK, 0 skipped. Real store fingerprint (266 entries: snapshots, derived/cohorts, derived/exports, receipts) identical before and after; ledger SHA-256 6d359b74… unchanged.",
+      "attribution": "Own observation. Test evidence for the code, not acceptance of the publication guarantee."
+    },
+    {
+      "id": "q021-inmemory-63f4221",
+      "level": "unit",
+      "outcome": "pass",
+      "observer": "Atlas repair worker (Q-021)",
+      "read_back": true,
+      "date": "2026-11-03",
+      "code_ref": "63f4221",
+      "command": "<venv>/python -B -m unittest discover -s tests (clean git archive export of 63f4221)",
+      "result": "Ran 70 tests in 14.325s, OK (skipped=28)",
+      "attribution": "Own observation."
+    },
+    {
+      "id": "review-v03-disk-63f4221",
+      "level": "disk",
+      "outcome": "pass",
+      "observer": "Final publication review c5df3251 (independent of the Q-022 fix worker)",
+      "read_back": true,
+      "date": "2026-11-03",
+      "code_ref": "63f4221",
+      "command": "CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests -v (clean git archive export of 63f4221), plus reversed order and the 11 store-read tests one by one",
+      "result": "Ran 70 tests in 40.787s, OK, 0 skipped; reversed 70 OK, 0 skipped; 11/11 isolated OK. Real-store fingerprint 266 entries, 0 differences; ledger SHA-256 6d359b74… unchanged.",
+      "attribution": "Recorded from reviews/corpus-pilot-review-v0.3.md §8 and §7 on the parent's instruction (independent reviewer). Not re-run by the atlas worker; its own run q021-disk-63f4221 gives the same 70 OK."
     }
   ],
   "runtime_unexercised": {
     "ebl-atf": "No fixture file. The local caller-supplied ATF path is exercised only by unit tests.",
     "oracc": "Refused by design: adapters.ingest raises for generic ORACC JSON. ORACC data enters only as oracc-selection.",
     "cdli-selection": "cdli_api.map_records has no fixture file; tests/test_corpus_pilot.py::test_catalog_only_claims_and_rejection builds inline data."
+  },
+  "corpus_snapshots": {
+    "snapshot:c316e7cbbaf8a7fca7705f0efa5c4a07": {
+      "status": "accepted",
+      "source": "ebl-cohort",
+      "ledger": "legacy-backfilled",
+      "writer_commit": "d6049e2",
+      "manifest_sha256": "075f6140562f63c9f80425abfc510271e66e2f637b155b3816aaaeb6ca19d9db",
+      "accepted_by": [
+        "reviews/atlas-recheck-v0.1.md"
+      ],
+      "note": "eBL∩ccpo P-number cohort (51 records). Published once; ledger row backfilled at ~09:59Z. Q-019 recounted every cited count from copies of its rows (0 mismatches). Q-005 accepted the pilot data surfaces."
+    },
+    "snapshot:edaab55c1a39cc65ad7c76e6d12547a7": {
+      "status": "accepted",
+      "source": "oracc-selection",
+      "ledger": "legacy-backfilled",
+      "writer_commit": "d6049e2",
+      "manifest_sha256": "be6b46f4645c7804c4707d4321ae57db68ded40668e5701204bc8c5cf5434499",
+      "accepted_by": [
+        "reviews/atlas-recheck-v0.1.md"
+      ],
+      "note": "ORACC ccpo, adapter oracc-cdl-1, 51 texts. Counts recounted by Q-019 and still valid. Superseded by snapshot:5e51403b for sense provenance: 1,309 Sense rows carry an instance sig (Q-005 F4), which is not the oracc-cdl-2 contract. Kept, never deleted."
+    },
+    "snapshot:fc7c350439f9edfee61b5f35bdd4d65a": {
+      "status": "accepted",
+      "source": "cdli-selection",
+      "ledger": "legacy-backfilled",
+      "writer_commit": "d6049e2",
+      "manifest_sha256": "49ee7411ef4550c7ae880d4836fffeba89c09ba0689e7293da18f2b22a82f82a",
+      "accepted_by": [
+        "reviews/atlas-recheck-v0.1.md"
+      ],
+      "note": "CDLI artifact JSON selection, 51 artifacts, catalog claims only (0 edges). Counts recounted by Q-019."
+    },
+    "snapshot:ce127437339109285185a534145edf50": {
+      "status": "incident",
+      "source": "ebl",
+      "ledger": "legacy-backfilled",
+      "writer_commit": "d6049e2",
+      "manifest_sha256": "54ee6523a4fd3d19609f2c6bffe13c414ab06d1215a87c08edc019129ebbf13c",
+      "note": "Deleted and rebuilt under the same ID at ~09:46Z (UI review F-4). First-version bytes not retained. Never evidence; kept, never deleted."
+    },
+    "snapshot:84971360d212834e0b7acbeac1e56abe": {
+      "status": "incident",
+      "source": "ebl-cohort",
+      "ledger": "legacy-backfilled",
+      "writer_commit": "d6049e2",
+      "manifest_sha256": "5f5bbeaa28a6feb93fc6e6ac5e363ade637b88c40325f0bc065716b6af463298",
+      "note": "Deleted and rebuilt under the same ID at ~09:46Z (UI review F-4). First-version bytes not retained. Never evidence; kept, never deleted."
+    },
+    "snapshot:5e51403b0d7dcdb90cb429d444e6a23b": {
+      "status": "accepted",
+      "source": "oracc-selection",
+      "ledger": "ledgered",
+      "writer_commit": "94af111",
+      "manifest_sha256": "48bdc39e62d6e35dbbe64c35b3c355d3088bf2fa39d17fcbe98d99f56b666c99",
+      "note": "ORACC ccpo rebuilt by adapter oracc-cdl-2 (Q-005 F4 fix), ledger format 2 reserve/commit at 10:36:22Z. Q-020 (v0.2 §7) verified its content and all 4,544 IN_SENSE source links against the raw nodes; v0.3 verified it ledgered and bytes-bound at 63f4221 and accepted the publication for the pilot. Its sense provenance supersedes edaab55c. Not yet cited as corpus_evidence (edaab55c counts are equal and remain cited).",
+      "accepted_by": [
+        "reviews/corpus-pilot-review-v0.2.md",
+        "reviews/corpus-pilot-review-v0.3.md"
+      ]
+    }
   }
 }

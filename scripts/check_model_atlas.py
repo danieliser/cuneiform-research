@@ -11,7 +11,12 @@ docs/model-atlas.json is the canonical machine model. This script:
   --write            regenerate those two generated regions from the JSON, then check.
   --runtime          also build the synthetic fixtures (and retained samples when present)
                      in memory and compare row counts with each entry's 'populated' status.
-                     'corpus' claims are checked against the cited snapshot manifests (read only).
+                     'corpus' claims are read (never written) from each cited snapshot by this
+                     script's own reader (EVIDENCE_READER): it must be 'accepted' in the atlas
+                     corpus_snapshots, plainly published in the ledger (formats 1/2, no incident),
+                     match the pinned manifest digest and every payload hash, and the cited count
+                     is taken from the hashed Parquet rows, never from manifest counts. The
+                     backend's storage.verified(..., ledger='require') is a cross-check.
                      Needs duckdb, e.g. run with the project venv interpreter.
   --self-test        copy the repo to a temporary directory, inject deliberate mismatches
                      and confirm each one is caught. Never touches the real files. Uses the
@@ -21,8 +26,19 @@ docs/model-atlas.json is the canonical machine model. This script:
 
 Static analysis is deliberately strict. When a manifest, rights or edge registry is built in a
 form the analyzer cannot resolve, the check FAILS rather than passing an incomplete inventory.
-The only way past an unsupported form is a declared contract in the atlas
+Tracked dicts and registries may only be read (subscript, ** spread, get/items/keys/values/copy,
+`in`, pure builtins, model.canonical) between binding and use; aliases, helper calls, unknown
+methods and escaping closures are unsupported. Any computed manifest_sha256 write is a signing
+site. The only way past an unsupported form is a declared contract in the atlas
 (implementation.static_contracts.<check>) that cites a test and the SHA-256 of the exact files.
+
+Scope, stated plainly: this is a bounded drift detector for the code shapes this package uses,
+not a general Python analyzer or proof. It does not model dynamic dispatch, getattr/setattr,
+exec, mutation through objects other than the tracked names, or code outside cuneiform/*.py.
+Commit-bound evidence (baseline, verification runs, DONE tasks) is resolved with git
+(--repo); without a repository it fails closed. Observer and read_back fields are trusted as
+recorded (AGENTS.md process rule), and a consistent same-owner rewrite of snapshot payload,
+manifest, ledger and atlas pin is not detectable here.
 
 Exit status 0 = consistent, 1 = errors found.
 """
@@ -69,8 +85,75 @@ SYNTHETIC = [('ebl', 'fixtures/ebl-synthetic.json'), ('cdli', 'fixtures/cdli-syn
              ('ebl-cohort', 'fixtures/ebl-synthetic.json'), ('oracc-selection', 'fixtures/oracc-synthetic.json')]
 RUNTIME_DRIVEN = {k for k, _ in SYNTHETIC} | {k for k, _ in SAMPLES}
 MUTATORS = {'update', 'setdefault', 'pop', 'popitem', 'clear', '__setitem__', '__delitem__', '__ior__'}
+# A tracked dict (manifest/meta) or registry (RIGHTS) may only be read in these ways between its binding and its
+# use. Any other load (alias, call argument, unknown method, closure) could add keys the analyzer cannot see.
+READONLY_METHODS = {'get', 'items', 'keys', 'values', 'copy'}
+PURE_BUILTINS = {'len', 'sorted', 'list', 'tuple', 'set', 'frozenset', 'iter', 'bool', 'isinstance', 'dict'}
 FINGERPRINT_GLOBS = ('cuneiform/*.py', 'cuneiform/schema.sql', 'sources/**/*', 'tests/*.py', 'fixtures/*')
+# Paths whose content a verification run is about. A commit that changes none of them (docs, atlas, queue)
+# leaves earlier runs current; any change here makes runs at other code historical.
+CODE_PATHS = ('cuneiform', 'tests', 'fixtures', 'sources')
+HEX_REF = re.compile(r'[0-9a-f]{7,40}')
+# The checker's own snapshot/ledger reader. It reads ledger formats 1 (legacy rows) and 2 (reserve/commit) and
+# manifests of schema 1/2. Anything else is refused as evidence, not guessed at. Bump when that contract changes.
+EVIDENCE_READER = 'corpus-evidence-reader-1'
+LEDGER_FILE = '.publication-ledger.jsonl'
+LEDGER_EVENTS = {'reserve', 'commit', 'abort', 'abandon', 'adopt', 'torn-tail-acknowledged'}
+PUBLICATION_LABELS = {'ledgered', 'ledgered-legacy', 'ledgered-legacy-backfilled'}  # backend labels accepted as evidence
 END = (10 ** 9, 0)
+
+
+class Git:
+    """Commit resolution for baseline, verification runs and DONE tasks. No repository = every lookup fails closed."""
+
+    def __init__(self, repo: Path | None):
+        self.repo = repo if repo is not None and (repo / '.git').exists() else None
+        self._commit, self._tree = {}, {}
+
+    def run(self, *args) -> subprocess.CompletedProcess:
+        return subprocess.run(['git', '-C', str(self.repo), *args], capture_output=True, text=True)
+
+    def commit(self, token) -> str | None:
+        """Full SHA for a 7-40 hex token naming a commit; None for task IDs, trees, blobs, ambiguous or unknown hex."""
+        token = str(token or '')
+        if self.repo is None or not HEX_REF.fullmatch(token):
+            return None
+        if token not in self._commit:
+            r = self.run('rev-parse', '--verify', '--quiet', f'{token}^{{commit}}')
+            self._commit[token] = r.stdout.strip() if r.returncode == 0 else None
+        return self._commit[token]
+
+    def is_ancestor(self, sha: str, head: str) -> bool:
+        return self.repo is not None and self.run('merge-base', '--is-ancestor', sha, head).returncode == 0
+
+    def code_tree(self, sha: str) -> dict[str, str]:
+        """{path: blob sha1} for CODE_PATHS at a commit."""
+        if sha not in self._tree:
+            r = self.run('ls-tree', '-r', '-z', sha, '--', *CODE_PATHS)
+            out = {}
+            for rec in r.stdout.split('\0'):
+                if rec:
+                    meta, path = rec.split('\t', 1)
+                    mode, typ, blob = meta.split()
+                    if typ == 'blob':
+                        out[path] = blob
+            self._tree[sha] = out
+        return self._tree[sha]
+
+
+def code_blobs(root: Path) -> dict[str, str]:
+    """{path: git blob sha1} for CODE_PATHS in a directory (live tree or export), ignoring bytecode caches."""
+    out = {}
+    for top in CODE_PATHS:
+        for p in sorted((root / top).rglob('*')):
+            if p.is_file() and not p.is_symlink() and '__pycache__' not in p.parts and p.suffix != '.pyc' and p.name != '.DS_Store':
+                data = p.read_bytes()
+                out[str(p.relative_to(root))] = hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest()
+    return out
+
+
+def tree_diff(a: dict, b: dict) -> list[str]:
+    return sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
 
 
 # ---------------------------------------------------------------- static analysis
@@ -284,13 +367,83 @@ def call_site_args(pkg: Package, rel: str, func, param: str):
         yield default, (rel, pkg.modules[rel], pos(func))
 
 
+def binds_locally(func, name: str) -> bool:
+    """True when a nested function has its own parameter or assignment named `name` (so it does not capture ours)."""
+    if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        a = func.args
+        if name in {x.arg for x in a.posonlyargs + a.args + a.kwonlyargs} | {x.arg for x in (a.vararg, a.kwarg) if x}:
+            return True
+    body = func.body if isinstance(func.body, list) else [func.body]
+    for s in body:
+        for n in ast.walk(s):
+            if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store):
+                return True
+    return False
+
+
+# Package functions known not to mutate their argument. Each is accepted only while its body keeps the stated shape.
+PURE_PACKAGE = {('cuneiform/model.py', 'canonical'): 'a single `return json.dumps(<first parameter>, ...)`'}
+
+
+def pure_package_call(pkg: Package, call: ast.Call) -> bool:
+    rel = pkg.module_of.get(id(call))
+    for (defining, fname) in PURE_PACKAGE:
+        tree = pkg.modules.get(defining)
+        func = next((s for s in (tree.body if tree else []) if isinstance(s, ast.FunctionDef) and s.name == fname), None)
+        if func is None or rel is None:
+            continue
+        body = [s for s in func.body if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
+        first = (func.args.posonlyargs + func.args.args)[:1]
+        shaped = (len(body) == 1 and isinstance(body[0], ast.Return) and isinstance(body[0].value, ast.Call)
+                  and ast.unparse(body[0].value.func) == 'json.dumps' and first and body[0].value.args
+                  and isinstance(body[0].value.args[0], ast.Name) and body[0].value.args[0].id == first[0].arg)
+        direct, modalias = pkg.aliases(rel, defining, fname)
+        f = call.func
+        named = (isinstance(f, ast.Name) and f.id in direct) or (
+            isinstance(f, ast.Attribute) and f.attr == fname and isinstance(f.value, ast.Name) and f.value.id in modalias)
+        if named and shaped:
+            return True
+    return False
+
+
+def read_only_use(pkg: Package, n: ast.Name) -> bool:
+    """A load of a tracked dict that cannot change its key set (R2 escape analysis)."""
+    p = pkg.parent.get(id(n))
+    if isinstance(p, ast.Call) and any(a is n for a in p.args) and pure_package_call(pkg, p):
+        return True                                   # canonical(name): serializes, never mutates
+    if isinstance(p, ast.Subscript) and p.value is n:
+        return True                                   # name[k] read, or name[k] = v (tracked separately)
+    if isinstance(p, ast.Dict) and any(k is None and v is n for k, v in zip(p.keys, p.values)):
+        return True                                   # {**name}: copies keys into a new dict
+    if isinstance(p, ast.Compare) and any(c is n for c in p.comparators) and all(isinstance(o, (ast.In, ast.NotIn)) for o in p.ops):
+        return True                                   # k in name
+    if isinstance(p, ast.Call) and isinstance(p.func, ast.Name) and p.func.id in PURE_BUILTINS and any(a is n for a in p.args):
+        return True                                   # dict(name, ...), len(name), sorted(name) ...
+    if isinstance(p, ast.Attribute) and p.value is n and p.attr in READONLY_METHODS:
+        g = pkg.parent.get(id(p))
+        return isinstance(g, ast.Call) and g.func is p
+    return False
+
+
 def apply_mutations(pkg: Package, rel: str, scope, name: str, bpos, upos, paths: list[dict]) -> list[dict]:
-    """Add constant subscript keys written to `name` between its binding and the use; fail on other mutations."""
+    """Add constant subscript keys written to `name` between its binding and the use; fail on other mutations
+    and on any load that lets the dict escape (alias, call argument, unknown method, closure capture)."""
     conds = {id(s): c for s, c in scope_statements(scope)}
     for n in ast.walk(scope):
         own = pkg.scope_of(n) is scope
         npos = pos(n) if hasattr(n, 'lineno') else None
         in_range = own and npos is not None and bpos < npos < upos
+        if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load):
+            if not own:
+                inner = pkg.scope_of(n)
+                if not binds_locally(inner, name) and not read_only_use(pkg, n):
+                    raise Unsupported(rel, n, f'`{name}` is captured by a nested function that lets it escape, which could '
+                                              'change its keys')
+            elif in_range and not read_only_use(pkg, n):
+                p = pkg.parent.get(id(n))
+                raise Unsupported(rel, n, f'`{name}` escapes before its keys are read (used in '
+                                          f'`{ast.unparse(p)[:60] if p is not None else name}`); aliases, helper calls and '
+                                          'unknown methods could add keys the analyzer cannot follow')
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) \
                 and n.func.value.id == name and n.func.attr in MUTATORS and (in_range or not own):
             raise Unsupported(rel, n, f'`{name}.{n.func.attr}(...)` changes the key set in a way the analyzer cannot follow')
@@ -389,24 +542,49 @@ def str_values(pkg: Package, expr, frame, depth: int = 0) -> set[str]:
     return {'*'}
 
 
+def computed(expr) -> bool:
+    """A manifest_sha256 value produced here (digest call, constant, ...), not copied from another record
+    (a name, attribute, subscript or `.get(...)` read)."""
+    if isinstance(expr, (ast.Name, ast.Attribute, ast.Subscript)):
+        return False
+    return not (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == 'get')
+
+
 def snapshot_manifests(pkg: Package) -> tuple[list[dict], list[Unsupported]]:
-    """Find every signed dict / `manifest = {...}` in the package and keep those that carry snapshot_id."""
-    sites = {}
+    """Find every signing site in the package and keep those whose key set carries snapshot_id.
+
+    A signing site is any write of a computed `manifest_sha256` value: `x['manifest_sha256'] = f(...)`, a dict
+    literal `{..., 'manifest_sha256': f(...)}` or `dict(..., manifest_sha256=f(...))`, plus `manifest = {...}`.
+    Records that only copy a digest (ledger rows, receipts, bindings) are not signing sites. A site whose keys
+    cannot be resolved is a problem (fail closed), whatever its variable is called."""
+    sites, early = {}, []
     for rel, tree in pkg.modules.items():
         for n in ast.walk(tree):
+            scope = pkg.scope_of(n)
+            if isinstance(n, ast.Dict) and any(const_str(k) == 'manifest_sha256' and computed(v) for k, v in zip(n.keys, n.values)):
+                sites[(rel, id(n))] = (rel, scope, n, pos(n))
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'dict' and any(
+                    k.arg == 'manifest_sha256' and computed(k.value) for k in n.keywords):
+                sites[(rel, id(n))] = (rel, scope, n, pos(n))
             if not isinstance(n, ast.Assign):
                 continue
             for t in n.targets:
-                if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and const_str(t.slice) == 'manifest_sha256':
-                    sites[(rel, id(pkg.scope_of(n)), t.value.id)] = (rel, pkg.scope_of(n), t.value.id, (n.lineno, n.col_offset + 1))
+                if isinstance(t, ast.Subscript) and const_str(t.slice) == 'manifest_sha256' and computed(n.value):
+                    if not isinstance(t.value, ast.Name):
+                        early.append(Unsupported(rel, n, f'signed record `{ast.unparse(t.value)[:40]}` is not a plain name'))
+                        continue
+                    sites[(rel, id(scope), t.value.id)] = (rel, scope, t.value.id, (n.lineno, n.col_offset + 1))
                 if isinstance(t, ast.Name) and t.id == 'manifest' and (isinstance(n.value, ast.Dict) or (
                         isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and n.value.func.id == 'dict')):
-                    sites.setdefault((rel, id(pkg.scope_of(n)), 'manifest'), (rel, pkg.scope_of(n), 'manifest', END))
-    results, problems = [], []
+                    sites.setdefault((rel, id(scope), 'manifest'), (rel, scope, 'manifest', END))
+    results, problems = [], early
     for rel, scope, var, upos in sites.values():
         where = f"{rel}::{getattr(scope, 'name', '<module>')}"
         try:
-            paths = name_paths(pkg, var, (rel, scope, upos), upos, 0)
+            if isinstance(var, str):
+                paths = name_paths(pkg, var, (rel, scope, upos), upos, 0)
+            else:
+                paths = [dict(p) for p in dict_paths(pkg, var, (rel, scope, upos))]
         except Unsupported as exc:
             problems.append(exc)
             continue
@@ -456,6 +634,11 @@ def registry(pkg: Package, defining: str, name: str) -> tuple[dict, list[Unsuppo
             return (isinstance(x, ast.Name) and x.id in direct) or (
                 isinstance(x, ast.Attribute) and x.attr == name and isinstance(x.value, ast.Name) and x.value.id in modalias)
         for n in ast.walk(mtree):
+            if is_ref(n) and isinstance(getattr(n, 'ctx', None), ast.Load) and not read_only_use(pkg, n) and not (
+                    isinstance(pkg.parent.get(id(n)), ast.Attribute) and pkg.parent[id(n)].attr in MUTATORS):
+                p = pkg.parent.get(id(n))
+                problems.append(Unsupported(rel, n, f'{name} escapes (used in `{ast.unparse(p)[:60] if p is not None else name}`); '
+                                                    'an alias or helper could add namespaces the analyzer cannot see'))
             if isinstance(n, ast.Assign):
                 for t in n.targets:
                     if isinstance(t, ast.Subscript) and is_ref(t.value):
@@ -534,6 +717,40 @@ def rights_origin(pkg: Package, value, frame, depth: int = 0) -> tuple[str, str 
         except Unsupported:
             pass
     return 'per-snapshot', None
+
+
+def registry_index(value):
+    """The index expression of a direct `RIGHTS[<expr>]` lookup (None for anything else)."""
+    return value.slice if isinstance(value, ast.Subscript) else None
+
+
+def rights_statement(pkg: Package, expr, frame, depth: int = 0) -> str:
+    """Stable fingerprint text of a rights expression and every same-package binding it reads (R4.4).
+    Line moves do not change it; any change to the expression or the literals it resolves to does."""
+    parts = [ast.dump(expr)]
+    if depth > 4:
+        return parts[0]
+    for n in ast.walk(expr):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+            try:
+                found = find_binding(pkg, frame[0], frame[1], n.id, pos(n))
+            except Unsupported:
+                parts.append(f'unresolved:{n.id}')
+                continue
+            parts.append(rights_statement(pkg, found[1], found[2], depth + 1) if found[0] == 'value' else f'param:{n.id}')
+        elif isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+            for target in pkg.modules:
+                if n.value.id in pkg.aliases(frame[0], target, n.attr)[1]:
+                    try:
+                        found = find_binding(pkg, target, pkg.modules[target], n.attr, END)
+                        parts.append(rights_statement(pkg, found[1], found[2], depth + 1))
+                    except Unsupported:
+                        parts.append(f'unresolved:{n.value.id}.{n.attr}')
+    return '\n'.join(parts)
+
+
+def statement_sha(texts) -> str:
+    return hashlib.sha256('\n--\n'.join(sorted(texts)).encode()).hexdigest()
 
 
 # ---------------------------------------------------------------- code contract
@@ -657,6 +874,20 @@ def code_contract(root: Path) -> dict:
     for m in manifests:
         r = m['keys'].get('rights')
         m['rights'] = rights_origin(pkg, r[0], r[1]) if r else ('missing', None)
+        m['rights_statement'] = rights_statement(pkg, r[0], r[1]) if r else None
+        # For RIGHTS[source] lookups: is the index the same name as the manifest's 'source' value?
+        src, idx = m['keys'].get('source'), registry_index(r[0]) if r else None
+        m['rights_indexed_by_source'] = bool(src and idx is not None and isinstance(idx, ast.Name) and isinstance(src[0], ast.Name)
+                                             and idx.id == src[0].id and src[1][1] is r[1][1])
+    rights_literals = {}
+    for k, v in rights.items():  # status of each registry namespace, where the code states it literally
+        node = v
+        if isinstance(node, ast.Subscript) and const_str(node.slice) in rights:
+            node = rights[node.slice.value]
+        try:
+            rights_literals[k] = ast.literal_eval(node).get('status')
+        except (ValueError, AttributeError, TypeError, SyntaxError):
+            rights_literals[k] = None
     registry_row = re.search(r"INSERT INTO registry VALUES \('([^']*)',\s*'([^']*)'\)", sql)
     return {
         'versions': {'schema': constant(model, 'SCHEMA_VERSION'), 'parser': constant(model, 'PARSER_VERSION'),
@@ -667,6 +898,7 @@ def code_contract(root: Path) -> dict:
         'tables': tables, 'views': set(views), 'written_tables': written_tables, 'written_edges': written_edges,
         'symbols': symbols, 'manifests': manifests, 'manifest_problems': manifest_problems + required_problems,
         'verify_required': required, 'rights_keys': set(rights), 'rights_problems': rights_problems,
+        'rights_status_code': rights_literals,
         'source_kinds': kinds, 'source_problems': kind_problems,
     }
 
@@ -684,23 +916,28 @@ def fingerprint(root: Path) -> dict[str, str]:
     return out
 
 
+def at_baseline(atlas: dict, r: dict) -> bool:
+    """Render-time test: the run was recorded at the baseline commit (both >= 7 hex, one a prefix of the other).
+    check() additionally resolves both with git and compares the code trees (R5)."""
+    a, b = str(r.get('code_ref', '')), str(atlas.get('baseline_commit', ''))
+    return bool(HEX_REF.fullmatch(a) and HEX_REF.fullmatch(b)) and (a.startswith(b) or b.startswith(a))
+
+
 def support(atlas: dict, e: dict) -> list[dict]:
     """Passing runs at the baseline commit that back this entry's verified level."""
     level = e['status']['verified']
     if level not in ('unit', 'disk'):
         return []
     runs = {r.get('id'): r for r in atlas.get('verification_runs', [])}
-    base = str(atlas.get('baseline_commit', ''))
     pool = [runs[r] for r in (e.get('verified_by') or runs) if r in runs]
     return [r for r in pool if r.get('outcome') == 'pass' and LEVEL_RANK.get(r.get('level'), 0) >= LEVEL_RANK[level]
-            and str(r.get('code_ref', '')) and base and (str(r['code_ref']).startswith(base) or base.startswith(str(r['code_ref'])))]
+            and at_baseline(atlas, r)]
 
 
 def verified_label(atlas: dict, e: dict) -> str:
-    """'disk (UNVERIFIED)' when every backing run was reported by the claimant and not read back."""
+    """'disk (UNVERIFIED)' unless a backing run at the baseline was read back by the parent or the observer."""
     level = e['status']['verified']
-    runs = support(atlas, e)
-    if runs and not any(r.get('read_back') for r in runs):
+    if level in ('unit', 'disk') and not any(r.get('read_back') for r in support(atlas, e)):
         return f'{level} (UNVERIFIED)'
     return level
 
@@ -770,10 +1007,15 @@ def gate(e: dict, check_name: str, problems: list[Unsupported], root: Path, erro
 
 
 def check(root: Path, runtime: bool = False, samples: Path | None = EVIDENCE_DIR, real_root: Path | None = None,
-          data_root: Path = DATA_ROOT, worktree: bool = False) -> tuple[list[str], list[str]]:
+          data_root: Path = DATA_ROOT, worktree: bool = False, repo: Path | None = None,
+          head: str = 'HEAD') -> tuple[list[str], list[str]]:
     errors, warnings = [], []
     err = errors.append
     real_root = real_root or root
+    git = Git(repo or real_root)
+    if git.repo is None:
+        err(f'git: no repository at {repo or real_root} (pass --repo); baseline, verification-run and DONE commits '
+            'cannot be resolved, so commit-bound evidence is refused')
     try:
         atlas = json.loads((root / ATLAS).read_text())
     except (OSError, ValueError) as exc:
@@ -812,10 +1054,56 @@ def check(root: Path, runtime: bool = False, samples: Path | None = EVIDENCE_DIR
         if r.get('outcome') not in ('pass', 'fail'):
             err(f"verification run {rid}: outcome {r.get('outcome')!r} not in ('pass', 'fail')")
     baseline = str(atlas.get('baseline_commit', ''))
+    checked_code = code_blobs(root)
+    base_sha = git.commit(baseline)
+    baseline_stale = None
+    if git.repo is not None:
+        if not base_sha:
+            err(f'baseline_commit {baseline!r} does not resolve to a commit in {git.repo} (need 7-40 hex naming a commit, '
+                'not a task ID, tree or unknown object)')
+        else:
+            changed = tree_diff(git.code_tree(base_sha), checked_code)
+            if changed:
+                baseline_stale = changed
+    for rid, r in runs.items():
+        if git.repo is not None and not git.commit(r.get('code_ref')):
+            err(f"verification run {rid}: code_ref {r.get('code_ref')!r} does not resolve to a commit (7-40 hex)")
 
     def current(r):
-        a, b = str(r.get('code_ref', '')), baseline
-        return bool(a and b) and (a.startswith(b) or b.startswith(a))
+        """The run's commit has exactly the checked code under CODE_PATHS (doc-only commits do not matter)."""
+        sha = git.commit(r.get('code_ref'))
+        return bool(sha) and not tree_diff(git.code_tree(sha), checked_code)
+    stale_entries = []
+
+    # -- corpus snapshot eligibility (R1): which real snapshots may be cited as corpus evidence, and why
+    snapshots = atlas.get('corpus_snapshots') or {}
+    for sid, s in sorted(snapshots.items()):
+        if not SNAPSHOT_ID.fullmatch(sid) or not isinstance(s, dict):
+            err(f'corpus_snapshots: {sid} must be snapshot:<32 hex> with an object value')
+            continue
+        if s.get('status') not in ('accepted', 'pending-review', 'incident'):
+            err(f"corpus_snapshots.{sid}: status {s.get('status')!r} not in ('accepted', 'pending-review', 'incident')")
+        if not re.fullmatch(r'[0-9a-f]{64}', str(s.get('manifest_sha256', ''))):
+            err(f'corpus_snapshots.{sid}: needs the observed manifest_sha256 (64 hex)')
+        if s.get('status') == 'accepted':
+            refs = s.get('accepted_by') or []
+            if not refs:
+                err(f'corpus_snapshots.{sid}: accepted needs accepted_by naming a reviews/ file that read it')
+            for ref in refs:
+                path = root / ref
+                if not ref.startswith('reviews/') or not path.is_file():
+                    err(f'corpus_snapshots.{sid}: accepted_by {ref} is not an existing reviews/ file')
+                elif sid[9:17] not in path.read_text():
+                    err(f'corpus_snapshots.{sid}: accepted_by {ref} never mentions {sid[9:17]}')
+            if not s.get('note'):
+                err(f'corpus_snapshots.{sid}: accepted needs a note on what the review established')
+    for e in entries:
+        for item in e.get('corpus_evidence') or []:
+            sid = str(item.get('snapshot_id'))
+            st = (snapshots.get(sid) or {}).get('status', 'unlisted')
+            if st != 'accepted':
+                err(f"{e.get('id')}: corpus evidence cites {sid}, whose corpus_snapshots status is {st}; incident, rebuilt "
+                    'and unreviewed snapshots are never independent evidence')
 
     # -- per-entry structure and status rules
     for e in entries:
@@ -854,8 +1142,7 @@ def check(root: Path, runtime: bool = False, samples: Path | None = EVIDENCE_DIR
             if not support:
                 err(f'{eid}: verified={level} has no passing {level}-level verification run')
             elif not any(current(r) for r in support):
-                err(f"{eid}: verified={level} rests only on runs at {sorted({r['code_ref'] for r in support})}, "
-                    f"not baseline {baseline}; re-run the suite and record the run, or lower the status")
+                stale_entries.append((eid, level, sorted({str(r['code_ref']) for r in support})))
         elif level == 'reviewed' and not any(str(x).startswith('reviews/') for x in e.get('reviewed_by', [])):
             err(f'{eid}: verified=reviewed needs a reviewed_by reference to a reviews/ file')
         if st.get('populated') == 'corpus':
@@ -908,6 +1195,15 @@ def check(root: Path, runtime: bool = False, samples: Path | None = EVIDENCE_DIR
                     err(f'{eid}: edge endpoint {ref} is not a node entry')
         if st.get('implemented') == 'none' and (impl.get('table') or impl.get('view')):
             err(f'{eid}: implemented=none but references a table/view')
+
+    if baseline_stale:
+        err(f'baseline stale: the checked code differs from baseline_commit {baseline} in {len(baseline_stale)} file(s) '
+            f'under {"/".join(CODE_PATHS)} (e.g. {baseline_stale[:4]}); the atlas describes {baseline} only. Re-run the '
+            'checks at the new code, record the runs and move baseline_commit')
+    if stale_entries:
+        err(f'{len(stale_entries)} entr(ies) with verified unit/disk rest only on runs whose code differs from the checked '
+            f'code, e.g. {[f"{i} ({lv}, runs at {refs})" for i, lv, refs in stale_entries[:5]]}; re-run the suite at this '
+            'code and record the run, or lower the status')
 
     # -- tables and fields
     owners = {}
@@ -1063,13 +1359,35 @@ def check(root: Path, runtime: bool = False, samples: Path | None = EVIDENCE_DIR
         labels = set().union(*(p['sources'] for p in code['manifests'])) if code['manifests'] else set()
         discovered = (code['source_kinds'] | labels) - {'*', '?'}
         declared = impl.get('rights_sources') or {}
+        status_of = impl.get('rights_status') or {}
+        # Per-snapshot rights statements (anything that is not a direct RIGHTS[...] lookup), by source label.
+        statements = {}
+        for p in code['manifests']:
+            if p['rights'][0] not in ('registry', 'missing'):
+                for s in p['sources'] - {'*', '?'}:
+                    statements.setdefault(s, set()).add(p['rights_statement'])
         for s in sorted(discovered - reg - set(declared)):
             err(f"{e['id']}: source kind {s} has no RIGHTS entry and no declared per-snapshot rights source "
                 f"(implementation.rights_sources); rights must never be implicit")
-        for s in sorted(set(declared) & reg):
-            err(f"{e['id']}: rights_sources declares {s}, but it is a RIGHTS registry key")
-        for s in sorted(set(declared) - discovered - reg):
-            err(f"{e['id']}: rights_sources declares {s}, which the code no longer uses")
+        for s in sorted(set(statements) - set(declared)):
+            err(f"{e['id']}: manifest paths for {s} write rights that are not a RIGHTS[...] lookup; declare the statement "
+                f"under implementation.rights_sources.{s} with its statement_sha256 (a registry key does not cover it)")
+        for s, d in sorted(declared.items()):
+            if s in reg and s not in statements:
+                err(f"{e['id']}: rights_sources declares {s}, but every path for it uses the RIGHTS registry")
+            if s not in discovered | reg:
+                err(f"{e['id']}: rights_sources declares {s}, which the code no longer uses")
+            if not isinstance(d, dict) or not d.get('note'):
+                err(f"{e['id']}: rights_sources.{s} must be an object with a note and statement_sha256")
+            elif s in statements and d.get('statement_sha256') != statement_sha(statements[s]):
+                err(f"{e['id']}: rights_sources.{s} statement changed in code (statement_sha256 "
+                    f"{d.get('statement_sha256')} != code {statement_sha(statements[s])}); review the "
+                    'rights text and record the new hash. Never invent or widen a grant')
+        for s in sorted((reg | set(declared)) - set(status_of)):
+            err(f"{e['id']}: implementation.rights_status has no expected status for {s}")
+        for s, st in sorted(code['rights_status_code'].items()):
+            if st is not None and status_of.get(s) is not None and status_of[s] != st:
+                err(f"{e['id']}: RIGHTS[{s!r}] status is {st!r} in code but the atlas declares {status_of[s]!r}")
         for p in code['manifests']:
             origin, key = p['rights']
             if origin == 'missing':
@@ -1081,6 +1399,9 @@ def check(root: Path, runtime: bool = False, samples: Path | None = EVIDENCE_DIR
             elif origin == 'registry' and key == '<source>':
                 for s in sorted(p['sources'] - {'*', '?'} - reg):
                     err(f"code: manifest path {p['where']} looks up RIGHTS[source] for {s}, which is not registered")
+            if p['sources'] & {'*', '?'} and not (origin == 'registry' and key == '<source>' and p['rights_indexed_by_source']):
+                err(f"code: manifest path {p['where']} has a computed or caller-supplied source kind, so its rights must be "
+                    f"exactly RIGHTS[source] (fails closed on unknown kinds); found {origin}")
 
     # -- runtime coverage of adapters/source kinds
     kinds = (code['source_kinds'] | code['rights_keys'] |
@@ -1108,8 +1429,12 @@ def check(root: Path, runtime: bool = False, samples: Path | None = EVIDENCE_DIR
         for dep in block['depends'] or []:
             if dep not in queue['blocks']:
                 err(f'{QUEUE} {qid}: depends on unknown {dep}')
-        if block['status'] == 'DONE' and not SHA_TOKEN.search(block['body']):
-            err(f'{QUEUE} {qid}: DONE without a backticked commit SHA in the block')
+        if block['status'] == 'DONE':
+            tokens = [x.strip('`') for x in SHA_TOKEN.findall(block['body'])]
+            commits = [c for c in (git.commit(x) for x in tokens) if c and git.is_ancestor(c, head)]
+            if not commits:
+                err(f'{QUEUE} {qid}: DONE without a backticked commit SHA in the block that resolves to a commit in the '
+                    f'checked history ({head}); task IDs, trees and unknown hex do not count (tokens: {tokens[:6]})')
     for qid in set(queue['rows']) - set(queue['blocks']):
         err(f'{QUEUE}: summary row {qid} has no task block')
     for mid in sorted(set(MODEL_ID.findall(queue['text']))):
@@ -1140,7 +1465,7 @@ def check(root: Path, runtime: bool = False, samples: Path | None = EVIDENCE_DIR
         err(f'{HTML}: embedded atlas data is stale; run scripts/check_model_atlas.py --write')
 
     if runtime:
-        runtime_check(root, entries, errors, warnings, samples, data_root, kinds, unexercised)
+        runtime_check(root, atlas, entries, errors, warnings, samples, data_root, kinds, unexercised)
     return errors, warnings
 
 
@@ -1227,46 +1552,219 @@ def entry_count(e: dict, counts: dict[str, int]) -> int | None:
     return None
 
 
-def corpus_check(root: Path, e: dict, data_root: Path, errors: list) -> bool:
-    """Read (never write) each cited snapshot manifest or edge Parquet and compare the cited count."""
+def canon(value) -> str:
+    """The manifest canonical form (sorted keys, compact, UTF-8), implemented here so the reader does not trust model.py."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open('rb') as handle:
+        while block := handle.read(1 << 20):
+            h.update(block)
+    return h.hexdigest()
+
+
+def read_ledger(path: Path) -> tuple[dict[str, list[dict]], list[str]]:
+    """Ledger formats 1 and 2 by snapshot ID. Unparseable middle records refuse everything (fail closed); an
+    unterminated final record is ignored, as an append in progress would be."""
+    if not path.is_file():
+        return {}, [f'no publication ledger at {path}']
+    data = path.read_bytes()
+    segs, out, problems = data.split(b'\n'), {}, []
+    for i, seg in enumerate(segs):
+        if not seg.strip():
+            continue
+        try:
+            rec = json.loads(seg)
+            if not isinstance(rec, dict):
+                raise ValueError('not an object')
+        except ValueError:
+            if i == len(segs) - 1:
+                continue
+            problems.append(f'unparseable ledger record #{i + 1} in {path}')
+            continue
+        fmt = rec.get('ledger_format', 1 if 'event' not in rec else None)
+        if fmt not in (1, 2) or (fmt == 2 and rec.get('event') not in LEDGER_EVENTS) or (fmt == 1 and 'event' in rec):
+            problems.append(f'ledger record #{i + 1} has format/event {fmt!r}/{rec.get("event")!r}, which {EVIDENCE_READER} does not read')
+            continue
+        if rec.get('event') == 'torn-tail-acknowledged':
+            continue
+        out.setdefault(str(rec.get('snapshot_id')), []).append(rec)
+    return out, problems
+
+
+def publication_state(recs: list[dict]) -> tuple[dict | None, str | None]:
+    """(published record, None) for exactly one legacy row, or reserve -> commit (earlier reserve -> abort allowed).
+    Adopted, recovered, abandoned, open or conflicting histories are refused as evidence (reason)."""
+    if not recs:
+        return None, 'not in the publication ledger'
+    if any('event' not in r for r in recs):
+        if len(recs) != 1:
+            return None, f'{len(recs)} ledger records including a legacy row (conflict)'
+        r = recs[0]
+        return {'kind': 'legacy-backfilled' if r.get('backfilled') else 'legacy', 'manifest_sha256': r.get('manifest_sha256'),
+                'manifest_file_sha256': None, 'incident': r.get('incident')}, None
+    state, reserved = 'unpublished', None
+    for r in recs:
+        ev = r['event']
+        if ev == 'reserve' and state in ('unpublished', 'aborted'):
+            state, reserved = 'reserved', r
+        elif ev == 'abort' and state == 'reserved':
+            state, reserved = 'aborted', None
+        elif ev == 'commit' and state == 'reserved' and not r.get('recovered') and \
+                (r.get('manifest_sha256'), r.get('manifest_file_sha256')) == (reserved.get('manifest_sha256'), reserved.get('manifest_file_sha256')):
+            state = 'published'
+        else:
+            return None, f'ledger history {[x["event"] for x in recs]} is not a plain reserve -> commit publication'
+    if state != 'published':
+        return None, f'ledger state {state}'
+    return {'kind': 'ledgered', 'manifest_sha256': reserved.get('manifest_sha256'),
+            'manifest_file_sha256': reserved.get('manifest_file_sha256'), 'incident': None}, None
+
+
+def manifest_field_entry(entries: list[dict]) -> dict | None:
+    return next((e for e in entries if e.get('implementation', {}).get('manifest_keys_of')), None)
+
+
+def read_snapshot(root: Path, atlas: dict, sid: str, data_root: Path) -> tuple[dict | None, list[str]]:
+    """Independent read of one cited snapshot (R1). Never writes. Returns per-table and per-edge-kind row counts."""
+    import duckdb  # noqa: PLC0415
+    problems = []
+    reg = (atlas.get('corpus_snapshots') or {}).get(sid)
+    if not isinstance(reg, dict) or reg.get('status') != 'accepted':
+        return None, [f'{sid} is not an accepted evidence snapshot in corpus_snapshots (status '
+                      f'{reg.get("status") if isinstance(reg, dict) else "unlisted"}); incident, rebuilt and unreviewed '
+                      'snapshots are never independent evidence']
+    folder = data_root / 'snapshots'
+    snap = folder / sid
+    ledger, lproblems = read_ledger(folder / LEDGER_FILE)
+    if lproblems:
+        return None, lproblems
+    rec, why = publication_state(ledger.get(sid, []))
+    if rec is None:
+        return None, [f'{sid}: {why}; unknown publication is not evidence']
+    if rec['incident'] or any(r.get('incident') for r in ledger.get(sid, [])):
+        return None, [f'{sid}: ledger marks a same-ID rebuild incident; its served bytes are not the first publication']
+    mpath = snap / 'manifest.json'
+    if not mpath.is_file():
+        return None, [f'{sid}: manifest not readable at {mpath}; unknown evidence is not success']
+    raw = mpath.read_bytes()
+    manifest = json.loads(raw)
+    signed = manifest.get('manifest_sha256')
+    if hashlib.sha256(canon({k: v for k, v in manifest.items() if k != 'manifest_sha256'}).encode()).hexdigest() != signed:
+        problems.append(f'{sid}: manifest fails its self-hash')
+    if manifest.get('snapshot_id') != sid:
+        problems.append(f'{sid}: directory holds the manifest of {manifest.get("snapshot_id")}')
+    if signed != rec['manifest_sha256']:
+        problems.append(f'{sid}: manifest_sha256 {str(signed)[:12]}… is not the ledger record {str(rec["manifest_sha256"])[:12]}…')
+    if rec['manifest_file_sha256'] and hashlib.sha256(raw).hexdigest() != rec['manifest_file_sha256']:
+        problems.append(f'{sid}: manifest.json bytes differ from the reserved file')
+    if reg.get('manifest_sha256') != signed:
+        problems.append(f'{sid}: manifest_sha256 {str(signed)[:12]}… differs from the digest pinned in corpus_snapshots '
+                        f'{str(reg.get("manifest_sha256"))[:12]}…')
+    if reg.get('ledger') and reg['ledger'] != rec['kind']:
+        problems.append(f'{sid}: ledger kind {rec["kind"]} != corpus_snapshots ledger {reg["ledger"]}')
+    files = manifest.get('files') or {}
+    on_disk = {str(p.relative_to(snap)) for p in snap.rglob('*') if p.is_file()} - {'manifest.json'}
+    if set(files) != on_disk:
+        problems.append(f'{sid}: payload files {sorted(on_disk ^ set(files))[:4]} are listed but missing, or present but unlisted')
+    for name, expected in sorted(files.items()):
+        p = snap / name
+        if Path(name).is_absolute() or '..' in Path(name).parts or not p.is_file():
+            continue
+        if sha256_file(p) != expected:
+            problems.append(f'{sid}: {name} does not match its manifest hash')
+    if problems:
+        return None, problems
+    counts, edge_counts = {}, {}
+    db = duckdb.connect(':memory:')
+    try:
+        for table, claimed in sorted((manifest.get('counts') or {}).items()):
+            pq = snap / 'parquet' / f'{table}.parquet'
+            if f'parquet/{table}.parquet' not in files:
+                problems.append(f'{sid}: no hashed Parquet for table {table}; its count cannot be read')
+                continue
+            n = db.execute('SELECT count(*) FROM read_parquet(?)', [str(pq)]).fetchone()[0]
+            counts[table] = n
+            if n != claimed:
+                problems.append(f'{sid}: manifest counts {table}={claimed}, hashed Parquet has {n} rows')
+        if 'parquet/edge.parquet' in files:
+            edge_counts = dict(db.execute('SELECT kind, count(*) FROM read_parquet(?) GROUP BY kind',
+                                          [str(snap / 'parquet' / 'edge.parquet')]).fetchall())
+    finally:
+        db.close()
+    return {'manifest': manifest, 'counts': counts, 'edges': edge_counts, 'ledger': rec, 'dir': snap}, problems
+
+
+def backend_verify(root: Path, snap: Path, sid: str) -> tuple[str, list[str]]:
+    """Cross-check with the checked code's own read verifier: storage.verified(ledger='require') where it exists,
+    else storage.verify (content only). Both are writer code; the checker's reader above is the primary check."""
     sys.path.insert(0, str(root))
-    from cuneiform.model import canonical, digest
+    try:
+        from cuneiform import storage  # noqa: PLC0415
+        if hasattr(storage, 'verified'):
+            out = storage.verified(snap, sid, ledger='require')
+            label = out['publication'].get('status')
+            if label not in PUBLICATION_LABELS or out['publication'].get('incident'):
+                return label, [f'{sid}: backend storage.verified labels it {label!r}{" (incident)" if out["publication"].get("incident") else ""}']
+            return label, []
+        storage.verify(snap, sid)
+        return 'content-only (backend has no ledger-checked read)', []
+    except Exception as exc:  # noqa: BLE001 - any refusal is a failure, never a pass
+        return 'refused', [f'{sid}: backend read verifier refused it: {type(exc).__name__}: {exc}']
+
+
+def corpus_check(root: Path, atlas: dict, e: dict, data_root: Path, errors: list, cache: dict) -> bool:
+    """Compare each cited count with rows read from the hashed, ledger-bound snapshot payload (never manifest counts)."""
     ok = bool(e.get('corpus_evidence'))
     for item in e.get('corpus_evidence') or []:
-        path = data_root / 'snapshots' / str(item.get('snapshot_id')) / 'manifest.json'
-        if not path.is_file():
-            errors.append(f"{e['id']}: corpus evidence {item.get('snapshot_id')} not readable at {path}; unknown evidence is not success")
+        sid = str(item.get('snapshot_id'))
+        if sid not in cache:
+            snap, problems = read_snapshot(root, atlas, sid, data_root)
+            if snap is not None and not problems:
+                snap['backend'], more = backend_verify(root, snap['dir'], sid)
+                problems += more
+                problems += snapshot_contract_problems(atlas, snap)
+            cache[sid] = (snap, problems)
+            errors.extend(f'corpus evidence: {p}' for p in problems)
+        snap, problems = cache[sid]
+        if snap is None or problems:
+            errors.append(f"{e['id']}: corpus evidence {sid} is not usable (see corpus evidence errors)")
             ok = False
             continue
-        manifest = json.loads(path.read_text())
-        unsigned = {k: v for k, v in manifest.items() if k != 'manifest_sha256'}
-        if digest(canonical(unsigned).encode()) != manifest.get('manifest_sha256'):
-            errors.append(f"{e['id']}: corpus evidence manifest {path} fails its self-hash")
-            ok = False
-        elif 'edge_kind' in item:
-            import duckdb  # noqa: PLC0415
-            edge_file = path.parent / 'parquet' / 'edge.parquet'
-            if manifest.get('files', {}).get('parquet/edge.parquet') is None or not edge_file.is_file():
-                errors.append(f"{e['id']}: corpus evidence {item.get('snapshot_id')} has no exported edge Parquet")
-                ok = False
-                continue
-            db = duckdb.connect(':memory:')
-            try:
-                n = db.execute('SELECT count(*) FROM read_parquet(?) WHERE kind = ?', [str(edge_file), item['edge_kind']]).fetchone()[0]
-            finally:
-                db.close()
-            if n != item.get('count'):
-                errors.append(f"{e['id']}: corpus evidence claims {item.get('count')} {item['edge_kind']} edges in "
-                              f"{item.get('snapshot_id')}, edge Parquet has {n}")
-                ok = False
-        elif manifest.get('counts', {}).get(item.get('table')) != item.get('count'):
-            errors.append(f"{e['id']}: corpus evidence claims {item.get('count')} rows of {item.get('table')} in "
-                          f"{item.get('snapshot_id')}, manifest says {manifest.get('counts', {}).get(item.get('table'))}")
+        if 'edge_kind' in item:
+            n, what = snap['edges'].get(item['edge_kind'], 0), f"{item['edge_kind']} edges"
+        else:
+            n, what = snap['counts'].get(item.get('table')), f"rows of {item.get('table')}"
+        if n != item.get('count'):
+            errors.append(f"{e['id']}: corpus evidence claims {item.get('count')} {what} in {sid}; the hashed payload has {n}")
             ok = False
     return ok
 
 
-def runtime_check(root, entries, errors, warnings, samples, data_root, kinds, unexercised):
+def snapshot_contract_problems(atlas: dict, snap: dict) -> list[str]:
+    """Runtime cross-checks of a real manifest against the atlas: keys (R3) and rights status (R4.5)."""
+    out, m = [], snap['manifest']
+    sid = m.get('snapshot_id')
+    me = manifest_field_entry(atlas.get('entries', []))
+    if me:
+        fields = {f['name']: f for f in me.get('fields', [])}
+        legacy = 'snapshot_contract' not in m
+        for k in sorted(set(m) - set(fields)):
+            out.append(f'{sid}: manifest key {k} is not an atlas field of {me["id"]}')
+        for k, f in sorted(fields.items()):
+            if f.get('presence') != 'optional' and k not in m and not (legacy and f.get('legacy_absent')):
+                out.append(f'{sid}: manifest lacks required atlas field {k}')
+    rights_entry = next((x for x in atlas.get('entries', []) if 'rights_keys' in x.get('implementation', {})), None)
+    expected = ((rights_entry or {}).get('implementation', {}).get('rights_status') or {}).get(m.get('source'))
+    if (m.get('rights') or {}).get('status') != expected:
+        out.append(f"{sid}: rights.status {(m.get('rights') or {}).get('status')!r} != atlas rights_status[{m.get('source')!r}] {expected!r}")
+    return out
+
+
+def runtime_check(root, atlas, entries, errors, warnings, samples, data_root, kinds, unexercised):
+    cache = {}
     synthetic = {}
     for kind, p in SYNTHETIC:  # one database per input: real imports never share a snapshot
         for key, n in runtime_counts(root, [(kind, root / p)]).items():
@@ -1289,7 +1787,7 @@ def runtime_check(root, entries, errors, warnings, samples, data_root, kinds, un
         claimed = e['status']['populated']
         print(f"{e['id']:40} {claimed:10} {n:9} {'-' if s is None else s:>8}")
         if claimed == 'corpus':
-            corpus_check(root, e, data_root, errors)
+            corpus_check(root, atlas, e, data_root, errors, cache)
             continue
         if sample is None:
             if claimed == 'sample':
@@ -1303,6 +1801,12 @@ def runtime_check(root, entries, errors, warnings, samples, data_root, kinds, un
             errors.append(f"{e['id']}: populated={claimed} but runtime observed {observed} (synthetic={n}, samples={s})")
     if sample is None:
         warnings.append('retained samples not found; sample-level population not verified')
+    store = data_root / 'snapshots'
+    listed = atlas.get('corpus_snapshots') or {}
+    if store.is_dir():
+        for d in sorted(store.glob('snapshot:*')):
+            if d.name not in listed:
+                warnings.append(f'{d.name} is in the store but not in corpus_snapshots; it is not evidence until reviewed and listed')
 
 
 # ---------------------------------------------------------------- rendering
@@ -1357,6 +1861,16 @@ def render_md(atlas: dict) -> str:
             out.append(f"| `{r['id']}` | {r['level']} | {r['outcome']} | {cell(r['observer'])} | "
                        f"{'yes' if r.get('read_back') else 'no (UNVERIFIED)'} | {r['date']} | `{r['code_ref']}` | "
                        f"`{cell(r['command'])}` | {cell(r['result'])} | {cell(r['attribution'])} |")
+    if atlas.get('corpus_snapshots'):
+        out += ['', '### Corpus snapshots (evidence eligibility)', '',
+                f'Only `accepted` snapshots may be cited as `corpus_evidence`. `--runtime` reads each cited one with the checker\'s '
+                f'own reader (`{EVIDENCE_READER}`): ledger record, pinned manifest digest, every payload hash, and row counts '
+                'from the hashed Parquet, then cross-checks the backend read verifier. Incident and pending-review snapshots '
+                'are listed so that they cannot be cited by mistake.', '',
+                '| Snapshot | Status | Source | Ledger | Writer code | Accepted by | Note |', '|---|---|---|---|---|---|---|']
+        for sid, s in sorted(atlas['corpus_snapshots'].items(), key=lambda kv: (kv[1].get('status') != 'accepted', kv[0])):
+            out.append(f"| `{sid}` | {s.get('status')} | {cell(s.get('source'))} | {cell(s.get('ledger'))} | "
+                       f"{cell(s.get('writer_commit'))} | {cell(s.get('accepted_by'))} | {cell(s.get('note'))} |")
     if atlas.get('runtime_unexercised'):
         out += ['', '### Runtime coverage', '',
                 f"`--runtime` builds in-memory inputs for: {', '.join(f'`{k}`' for k in sorted(RUNTIME_DRIVEN))}. "
@@ -1399,7 +1913,11 @@ def render_md(atlas: dict) -> str:
                 out.append('- **Values:** ' + '; '.join(f'{k}: {val}' for k, val in e['values'].items()))
             impl = e.get('implementation', {})
             if impl.get('rights_sources'):
-                out.append('- **Per-snapshot rights sources:** ' + '; '.join(f'`{k}`: {val}' for k, val in impl['rights_sources'].items()))
+                out.append('- **Per-snapshot rights sources:** ' + '; '.join(
+                    f"`{k}`: {val.get('note') if isinstance(val, dict) else val}" for k, val in impl['rights_sources'].items()))
+            if impl.get('rights_status'):
+                out.append('- **Expected rights status by source kind:** ' + '; '.join(
+                    f'`{k}`: {v}' for k, v in sorted(impl['rights_status'].items())))
             if e.get('edge'):
                 g = e['edge']
                 out.append(f"- **Edge:** {cell(g.get('source'))} → {g.get('target')} · cardinality {g.get('cardinality', '—')}"
@@ -1477,8 +1995,8 @@ def materialize(root: Path, ref: str, dest: Path) -> Path:
                           check=True, capture_output=True).stdout
     with tarfile.open(fileobj=io.BytesIO(data)) as tar:
         tar.extractall(dest, filter='data')
-    for rel in OWNED:
-        if (root / rel).exists():
+    for rel in OWNED + tuple(str(p.relative_to(root)) for p in sorted((root / 'reviews').glob('*.md'))):
+        if (root / rel).exists():  # review files are read-only references; overlaid so evidence links resolve
             (dest / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(root / rel, dest / rel)
     return dest
@@ -1509,14 +2027,24 @@ def edit_atlas(fn):
 
 
 def schema_only_table(atlas: dict, r: Path, unwritten: bool = False) -> str:
-    """First table-backed entry with implemented=schema; the anchor follows the atlas, not a fixed name."""
+    """First table-backed entry with implemented=schema. When the atlas has none left (a legitimate state once every
+    table is implemented), add a synthetic schema-only table to the copy's schema.sql and atlas instead (R8).
+    The caller writes `atlas` back."""
     tables = parse_tables((r / 'cuneiform/schema.sql').read_text())
     written = code_contract(r)['written_tables'] if unwritten else set()
     for e in atlas['entries']:
         t = e.get('implementation', {}).get('table')
         if t in tables and t not in written and e['status']['implemented'] == 'schema':
             return e['id']
-    raise AssertionError('no schema-only table entry left to target')
+    sql = r / 'cuneiform/schema.sql'
+    sql.write_text(sql.read_text().rstrip('\n') + '\nCREATE TABLE selftest_schema_only(id VARCHAR PRIMARY KEY);\n')
+    atlas['entries'].append({
+        'id': 'table:selftest_schema_only', 'kind': 'table', 'domain': atlas['domains'][0]['id'], 'label': 'Self-test table',
+        'summary': 'Synthetic schema-only table added by --self-test because the atlas has none.',
+        'status': {'modeled': 'specified', 'implemented': 'schema', 'populated': 'none', 'verified': 'none'},
+        'implementation': {'table': 'selftest_schema_only'},
+        'fields': [{'name': 'id', 'type': 'VARCHAR', 'nullable': False, 'key': 'PK'}], 'queue': []})
+    return 'table:selftest_schema_only'
 
 
 def manifest_dict_insert(text: str, r: Path, snippet: str) -> str:
@@ -1544,12 +2072,15 @@ def mutate_schema_table(atlas_fn):
         eid = schema_only_table(atlas, r)
         atlas_fn(next(e for e in atlas['entries'] if e['id'] == eid))
         p.write_text(json.dumps(atlas, ensure_ascii=False, indent=2) + '\n')
+        write(r)
     return apply
 
 
 def undeclared_write(r: Path):
     atlas = json.loads((r / ATLAS).read_text())
     eid = schema_only_table(atlas, r, unwritten=True)
+    (r / ATLAS).write_text(json.dumps(atlas, ensure_ascii=False, indent=2) + '\n')
+    write(r)  # a synthetic entry must not show up as a stale generated block
     table = next(e for e in atlas['entries'] if e['id'] == eid)['implementation']['table']
     append('cuneiform/adapters.py', f"def _selftest_write(builder):\n    builder.add('{table}', 'x')\n")(r)
 
@@ -1607,6 +2138,42 @@ def analyzer_cases() -> list[tuple[str, dict, object]]:
                        "def chk(manifest):\n    return manifest['source'] in SEL\n"
                        "def imp():\n    manifest={'snapshot_id':1,'source':'a','rights':RIGHTS['a']}\n    manifest['manifest_sha256']=0\n"},
          lambda keys, opt, srcs, rights, kinds: {'x-selection', 'y-selection'} <= kinds),
+        ('analyzer: alias of a tracked dict is unsupported (R2)', {
+            'adapters': adapters,
+            'storage': head + verify + "def imp():\n    meta={'source':'a','rights':RIGHTS['a']}\n    alias=meta\n    alias['k']=1\n"
+                                       "    manifest={'snapshot_id':1,**meta}\n    manifest['manifest_sha256']=digest(canonical(manifest))\n"},
+         'unsupported'),
+        ('analyzer: helper call on a tracked dict is unsupported (R2)', {
+            'adapters': adapters,
+            'storage': head + verify + "def add(d):\n    d['k']=1\n"
+                                       "def imp():\n    meta={'source':'a','rights':RIGHTS['a']}\n    add(meta)\n"
+                                       "    manifest={'snapshot_id':1,**meta}\n    manifest['manifest_sha256']=digest(canonical(manifest))\n"},
+         'unsupported'),
+        ('analyzer: dict.update(meta, ...) is unsupported (R2)', {
+            'adapters': adapters,
+            'storage': head + verify + "def imp():\n    meta={'source':'a','rights':RIGHTS['a']}\n    dict.update(meta, k=1)\n"
+                                       "    manifest={'snapshot_id':1,**meta}\n    manifest['manifest_sha256']=digest(canonical(manifest))\n"},
+         'unsupported'),
+        ('analyzer: a signed {**body, manifest_sha256: ...} literal is a site, whatever its name (R3)', {
+            'adapters': adapters,
+            'storage': head + verify + "def imp():\n    body={'snapshot_id':1,'source':'a','rights':RIGHTS['a'],'newkey':1}\n"
+                                       "    return {**body,'manifest_sha256':digest(canonical(body))}\n"},
+         lambda keys, opt, srcs, rights, kinds: 'newkey' in keys and 'manifest_sha256' in keys),
+        ('analyzer: a signed dict(body, manifest_sha256=...) call is a site (R3)', {
+            'adapters': adapters,
+            'storage': head + verify + "def imp():\n    body={'snapshot_id':1,'source':'a','rights':RIGHTS['a'],'callkey':1}\n"
+                                       "    return dict(body, manifest_sha256=digest(canonical(body)))\n"},
+         lambda keys, opt, srcs, rights, kinds: 'callkey' in keys),
+        ('analyzer: canonical(x) on a tracked dict is a read, not an escape', {
+            'adapters': adapters, 'model': "import json\ndef canonical(value):\n    return json.dumps(value, sort_keys=True)\n",
+            'storage': "from .adapters import RIGHTS\nfrom .model import canonical\n" + verify +
+                       "def imp():\n    manifest={'snapshot_id':1,'source':'a','rights':RIGHTS['a']}\n    manifest['x']=len(canonical(manifest))\n"
+                       "    manifest['manifest_sha256']=hash(canonical(manifest))\n"},
+         lambda keys, opt, srcs, rights, kinds: 'x' in keys),
+        ('analyzer: a local alias of RIGHTS is unsupported (R4)', {
+            'adapters': adapters + "_r = RIGHTS\n_r['z'] = {}\n",
+            'storage': head + verify + "def imp():\n    manifest={'snapshot_id':1,'source':'a','rights':RIGHTS['a']}\n    manifest['manifest_sha256']=0\n"},
+         'rights-unsupported'),
         ('analyzer: source kind bound by tuple unpacking keeps its label', {
             'adapters': adapters,
             'storage': head + verify + signer + "def c(x):\n    source, ns = 'c-selection', 'c'\n"
@@ -1638,13 +2205,50 @@ def run_analyzer_case(files: dict, expect) -> tuple[bool, str]:
         return bool(ok), f'keys={sorted(keys)} optional={sorted(keys - always)} rights={sorted(rights)} kinds={sorted(kinds)}'
 
 
-def self_test(root: Path, ref: str) -> int:
+def self_test(root: Path, ref: str, repo: Path | None = None) -> int:
     def runs_at(atlas, code_ref):
         for r in atlas.get('verification_runs', []):
             r['code_ref'] = code_ref
 
     def first_disk(atlas):
-        return next(e for e in atlas['entries'] if e['status']['verified'] == 'disk')
+        """A verified=disk entry; synthesized from a code entry plus a disk run at the baseline when none exists (R8)."""
+        e = next((x for x in atlas['entries'] if x['status']['verified'] == 'disk'), None)
+        if e is not None:
+            return e
+        run = next((r for r in atlas.get('verification_runs', []) if r.get('level') == 'disk' and r.get('outcome') == 'pass'
+                    and r.get('code_ref') == atlas.get('baseline_commit')), None)
+        if run is None:
+            run = {'id': 'selftest-disk', 'level': 'disk', 'outcome': 'pass', 'observer': 'self-test', 'read_back': False,
+                   'date': 'self-test', 'code_ref': atlas.get('baseline_commit'), 'command': 'self-test', 'result': 'synthetic',
+                   'attribution': 'synthetic run added by --self-test'}
+            atlas.setdefault('verification_runs', []).append(run)
+        e = next(x for x in atlas['entries'] if x['status']['implemented'] == 'code'
+                 and any(str(r).startswith('tests/') for r in x.get('evidence', [])))
+        e['status']['verified'] = 'disk'
+        e['verified_by'] = [run['id']]
+        return e
+
+    def cite_unaccepted(atlas):
+        snaps = atlas.setdefault('corpus_snapshots', {})
+        sid = next((k for k, v in snaps.items() if v.get('status') != 'accepted'), None)
+        if sid is None:
+            sid = 'snapshot:' + '0' * 32
+            snaps[sid] = {'status': 'pending-review', 'manifest_sha256': '0' * 64, 'note': 'self-test'}
+        e = next((x for x in atlas['entries'] if x.get('corpus_evidence')), None)
+        if e is None:
+            e = first_code_table(atlas)
+            e['status']['populated'] = 'corpus'
+            e['corpus_evidence'] = []
+        target = ('edge_kind', e['id'][5:]) if e.get('kind') == 'edge' else ('table', e['implementation'].get('table'))
+        e['corpus_evidence'].append({'snapshot_id': sid, target[0]: target[1], 'count': 1, 'observer': 'self-test'})
+
+    def accepted_without_review(atlas):
+        snaps = atlas.setdefault('corpus_snapshots', {})
+        sid = next((k for k, v in snaps.items() if v.get('status') == 'accepted'), None)
+        if sid is None:
+            sid = 'snapshot:' + '1' * 32
+            snaps[sid] = {'status': 'accepted', 'manifest_sha256': '1' * 64, 'note': 'self-test'}
+        snaps[sid]['accepted_by'] = []
 
     def first_code_table(atlas):
         return next(e for e in atlas['entries'] if e.get('implementation', {}).get('table') and e['status']['implemented'] == 'code')
@@ -1684,7 +2288,15 @@ def self_test(root: Path, ref: str) -> int:
             "def _selftest_source(manifest):\n    return manifest['source'] == 'selftest-kind'"), 'source kind selftest-kind has no RIGHTS entry'),
         ('populated=corpus without receipt evidence', edit_atlas(set_corpus), 'populated=corpus needs corpus_evidence'),
         ('verified=disk without a named run', edit_atlas(lambda a: first_disk(a).pop('verified_by', None)), 'must name its run'),
-        ('verification runs older than the baseline', edit_atlas(lambda a: runs_at(a, '0000000')), 'rests only on runs'),
+        ('verification runs at a commit that does not exist', edit_atlas(lambda a: runs_at(a, '0000000')), 'rest only on runs'),
+        ('verification run code_ref is not a commit (one hex character)', edit_atlas(
+            lambda a: a['verification_runs'][0].__setitem__('code_ref', str(a['verification_runs'][0]['code_ref'])[:1])), 'does not resolve'),
+        ('baseline_commit is not a commit', edit_atlas(lambda a: a.__setitem__('baseline_commit', 'deadbee')), 'does not resolve'),
+        ('contract-neutral code edit makes the baseline stale', append('cuneiform/model.py', '# selftest: contract-neutral edit'),
+         'baseline stale'),
+        ('corpus evidence cites a non-accepted snapshot', edit_atlas(cite_unaccepted), 'never independent evidence'),
+        ('accepted corpus snapshot without a review reference', edit_atlas(accepted_without_review), 'accepted needs accepted_by'),
+        ('DONE citing only a task ID', edit_text(QUEUE, lambda t, r: _done_without_sha(t, '(task `8d17b311`)')), 'DONE without'),
         ('unknown queue reference', edit_atlas(lambda a: a['entries'][0].__setitem__('queue', ['Q-999'])), 'Q-999'),
         ('queue status drift', edit_text(QUEUE, lambda t, r: re.sub(
             r'^(- \*\*Status:\*\*\s*`)(\w+)`', lambda m: m.group(1) + ('BLOCKED' if m.group(2) != 'BLOCKED' else 'TODO') + '`',
@@ -1709,7 +2321,7 @@ def self_test(root: Path, ref: str) -> int:
                 copy.mkdir()
                 materialize(root, ref, copy)
             return copy
-        base_errors, _ = check(fresh(), real_root=root)
+        base_errors, _ = check(fresh(), real_root=root, repo=repo)
         if ref == 'WORKTREE':
             print(f'BASE  live tree copy has {len(base_errors)} pre-existing error(s); cases count only new ones')
         else:
@@ -1721,7 +2333,7 @@ def self_test(root: Path, ref: str) -> int:
             copy = fresh()
             try:
                 apply(copy)
-                errors, _ = check(copy, real_root=root)
+                errors, _ = check(copy, real_root=root, repo=repo)
                 new = [x for x in errors if x not in baseline]
                 ok = any(expect in x for x in new)
                 detail = '' if ok else f'  -> new errors: {new[:3]}'
@@ -1741,8 +2353,9 @@ def self_test(root: Path, ref: str) -> int:
     return 1 if failures else 0
 
 
-def _done_without_sha(text: str) -> str:
-    """Mark the first non-DONE task DONE in both the summary row and its block, without adding a SHA."""
+def _done_without_sha(text: str, note: str = '') -> str:
+    """Mark the first non-DONE task DONE in both the summary row and its block, without adding a commit SHA
+    (`note` may add a backticked non-commit hex token such as a task ID)."""
     blocks = list(re.finditer(r'^## (Q-\d{3})\b.*$', text, re.M))
     for i, h in enumerate(blocks):
         body = text[h.end():blocks[i + 1].start() if i + 1 < len(blocks) else len(text)]
@@ -1750,7 +2363,7 @@ def _done_without_sha(text: str) -> str:
         if st and st.group(1) != 'DONE' and not SHA_TOKEN.search(body):
             qid = h.group(1)
             start = h.end() + st.start()
-            text = text[:start] + body[st.start():st.end()].replace(st.group(1), 'DONE') + text[h.end() + st.end():]
+            text = text[:start] + body[st.start():st.end()].replace(st.group(1), 'DONE') + (f' {note}' if note else '') + text[h.end() + st.end():]
             return re.sub(rf'^(\|\s*{qid}\s*\|[^|]*\|\s*)`\w+`', r'\1`DONE`', text, count=1, flags=re.M)
     raise AssertionError('no task block without a SHA to mark DONE')
 
@@ -1771,22 +2384,26 @@ def main() -> int:
                         help='check committed code at REV (e.g. HEAD) with the working-tree atlas/queue files overlaid; '
                              'use while another worker has uncommitted code changes. --self-test defaults to HEAD.')
     parser.add_argument('--fingerprint', action='store_true', help='print the live input fingerprint as JSON and exit')
+    parser.add_argument('--repo', type=Path, help='git repository used to resolve baseline, run and DONE commits '
+                                                  '(default: --root; needed when --root is an export without .git)')
     args = parser.parse_args()
     root = args.root.resolve()
     if args.fingerprint:
         print(json.dumps(fingerprint(root), indent=1, sort_keys=True))
         return 0
+    repo = args.repo.resolve() if args.repo else root
     if args.self_test:
-        return self_test(root, args.git_ref or 'HEAD')
+        return self_test(root, args.git_ref or 'HEAD', repo)
     if args.write:
         write(root)
     if args.git_ref:
         with tempfile.TemporaryDirectory(prefix='atlas-ref-') as tmp:
             errors, warnings = check(materialize(root, args.git_ref, Path(tmp)), runtime=args.runtime, samples=args.samples,
-                                     real_root=root, data_root=args.data_root)
+                                     real_root=root, data_root=args.data_root, repo=repo)
             print(f'checked code at {args.git_ref} with working-tree atlas/queue overlaid')
     else:
-        errors, warnings = check(root, runtime=args.runtime, samples=args.samples, data_root=args.data_root, worktree=True)
+        errors, warnings = check(root, runtime=args.runtime, samples=args.samples, data_root=args.data_root, worktree=True,
+                                 repo=repo)
     for w in warnings:
         print('warning:', w)
     for e in errors:

@@ -6,10 +6,12 @@ This is the agent-readable map of the cuneiform evidence model. For every part o
 
 - [`docs/model-atlas.json`](model-atlas.json) is the **only canonical machine model**. Everything below the generated marker in this file, and the data block embedded in `model-atlas.html`, is regenerated from it.
 - Code is the authority for what exists. `python3 scripts/check_model_atlas.py` fails if any of these drift: schema tables and columns, views, `NodeKind`, `EDGE_TYPES` (literal and `EDGE_TYPES[...] =` entries), edge kinds written by the adapters and their qualification keys, `portable_edge` kinds, snapshot-manifest keys on every construction path (with `**` spreads followed through call sites, and per-source optional keys), the keys `storage.verify()` requires, rights namespaces (literal and `RIGHTS[...] =` entries), every source kind the code dispatches on, versions, and the generated files.
-- Static analysis fails closed. If a manifest, rights or edge registry is built in a form the checker cannot resolve (for example `manifest.update(x)` or `**helper()`), the check fails instead of passing an incomplete inventory. The only way past it is a declared `static_contracts` entry that cites a test and the SHA-256 of the exact files.
+- Static analysis fails closed for the forms it tracks. If a manifest, rights or edge registry is built in a form the checker cannot resolve (for example `manifest.update(x)`, `**helper()`, an alias such as `alias = meta`, passing the dict to a helper, `dict.update(meta, …)`, or a local alias of `RIGHTS`), the check fails instead of passing an incomplete inventory. Any write of a computed `manifest_sha256` is a signing site, whatever the variable is called. Each per-snapshot rights statement is fingerprinted (`statement_sha256`), and a computed source kind must use exactly `RIGHTS[source]`. The only way past an unsupported form is a declared `static_contracts` entry that cites a test and the SHA-256 of the exact files.
+- **Limits of the static checks.** They are a bounded drift detector for the code shapes this package uses, not a general Python analyzer. Dynamic dispatch, `getattr`/`setattr`, `exec`, mutation through objects outside the tracked names, and code outside `cuneiform/*.py` are not modelled. When the checker reports "unsupported static analysis", rewrite the code into a supported form rather than growing the analyzer.
 - Every source kind needs a rights entry or a declared per-snapshot rights source, and either a `--runtime` input or a `runtime_unexercised` reason.
-- `verified` levels must be backed by a recorded run in `verification_runs` at the baseline commit. Each run names its observer. A level backed only by the implementer's own report renders as **UNVERIFIED**. Runs at older commits are historical evidence, not proof about present code.
-- `--runtime` (run with the project venv, which has duckdb) drives the real adapters for `ebl`, `cdli`, `ebl-cohort` and `oracc-selection` on synthetic fixtures and the retained samples in memory. It fails if any `populated` claim is above or below what was observed, if a `sample` claim cannot be checked because samples are missing, or if a `corpus` claim's cited snapshot count cannot be re-read (manifest table counts or the exported edge Parquet, read only).
+- `verified` levels must be backed by a recorded run in `verification_runs`. The checker resolves `baseline_commit` and every run's `code_ref` with git (7–40 hex naming a commit; task IDs, trees and unknown hex are refused) and compares each run's tree under `cuneiform/`, `tests/`, `fixtures/` and `sources/` with the checked code. Doc-only commits keep runs current. Any code edit after the baseline reports "baseline stale" until the runs are redone and the baseline moves. Each run names its observer. A level whose runs were all reported by the implementer renders as **UNVERIFIED**. Pass `--repo` when `--root` is an export without `.git`.
+- `--runtime` (run with the project venv, which has duckdb) drives the real adapters for `ebl`, `cdli`, `ebl-cohort` and `oracc-selection` on synthetic fixtures and the retained samples in memory. It fails if any `populated` claim is above or below what was observed, or if a `sample` claim cannot be checked because samples are missing.
+- **Corpus evidence** may cite only snapshots listed as `accepted` in `corpus_snapshots`, with a `reviews/` file that read them. Incident (same-ID rebuild) and pending-review snapshots are listed so that they cannot be cited. `--runtime` reads each cited snapshot read-only with the checker's own reader (`corpus-evidence-reader-1`): a plain ledger publication (legacy row, or reserve then commit), no incident note, the manifest digest pinned in the atlas, the manifest.json bytes for format-2 rows, every payload hash, no unlisted files, and row counts from the hashed Parquet, which must equal both the manifest counts and the cited count. It also checks manifest keys against the atlas fields and `rights.status` against `rights_status`, then cross-checks the backend's own `storage.verified(..., ledger='require')`. Manifest counts are never trusted on their own. Limit: the same owner can rewrite Parquet, manifest, ledger and the atlas pin consistently; the ledger records what writers observed and is not a signature.
 - `--self-test` injects deliberate mismatches into a temporary copy and confirms that each one is caught. Targets are chosen at run time, so the cases survive model changes; `--git-ref WORKTREE` runs them against uncommitted code.
 - Edit the JSON, run `--write`, then run `--check`. Do not hand-edit the generated block or the HTML data block.
 
@@ -58,7 +60,12 @@ Status: **decisions accepted, nothing implemented.** The parent accepted the con
 
 **Precision is never forced.** A range printed by a source gets precision `as-printed`: the bounds are kept exactly as printed, with no claim about the precision they imply. `unknown` is used when precision cannot be determined. Round numbers never imply century precision. A CDLI period gloss such as `Uruk III (ca. 3200-3000 BC)` is the catalog's chronology convention, printed on every row of that period. Its basis is `catalog-period-gloss`; it is not a dating of the object, and repeated copies of it are one assertion, not many.
 
-**Observed raw shapes** (from small retained samples, kept raw today):
+**Observed raw shapes.** Persisted pilot JSON (structure only; no value is parsed or interpreted):
+
+- CDLI artifact JSON (`snapshot:fc7c3504…`, 51 records): `period` is an object `{id, name, period, sequence, time_range}` (41) or null (10), for example `Neo-Assyrian (ca. 911-612 BC)` with `time_range` `ca. 911-612 BC`. `dates` is an empty list in all 51. `dates_referenced` is null in 50 and the regnal-style string `Artaxerxes.19.11.23` in one. `accession_no` values such as `1883-01-18, 0722` are registration numbers, not dates.
+- eBL fragment JSON (`snapshot:c316e7cb…`, 51 records): `script` is `{period, periodModifier, sortKey, uncertain}`. `date` is null and `datesInText` is empty in all 51. `record` lists editorial events `{date, type, user}`, which are eBL system time, never ancient dates.
+
+From the small retained CSV and K.1 samples (kept raw today):
 
 - CDLI `period` gives a label plus a printed approximate range, for example `Uruk III (ca. 3200-3000 BC)`.
 - `date_of_origin` and `dates_referenced` use the sentinel `00.00.00.00` or are empty.
@@ -80,7 +87,7 @@ Status: **decisions accepted, nothing implemented.** The parent accepted the con
 ## Generated reference
 
 <!-- ATLAS:BEGIN generated by scripts/check_model_atlas.py --write; do not edit by hand -->
-Atlas revision 2 · updated 2026-11-03 · baseline `d6049e2` · schema `2` / parser `conservative-3` / projection `linked-1` · 107 entries.
+Atlas revision 4 · updated 2026-11-03 · baseline `63f4221` · schema `2` / parser `conservative-3` / projection `linked-1` · 107 entries.
 
 ### Status counts by domain
 
@@ -107,6 +114,27 @@ A `verified` status is backed by these recorded runs. Each run names who observe
 | `q018-inmemory-2ab620b` | unit | pass | Atlas review-fix worker (Q-018) | yes | 2026-11-03 | `2ab620b` | `<venv>/python -B -m unittest discover -s tests (clean git archive export of HEAD at 09:57Z)` | Ran 31 tests in 12.049s, OK (skipped=1) | Own observation. Historical. |
 | `corpus-worker-disk-d6049e2` | disk | pass | Corpus worker, task 64821742 (Q-001) | no (UNVERIFIED) | 2026-11-03 | `d6049e2` | `CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests` | Ran 43 tests in 15.4s, OK | UNVERIFIED: reported by the implementer in CHECKPOINT.md at d6049e2. The atlas worker did not re-run the disk tests. Independent corpus review (Q-005) pending. |
 | `q007-inmemory-d6049e2` | unit | pass | Atlas sync worker (Q-007/Q-018) | yes | 2026-11-03 | `d6049e2` | `<venv>/python -B -m unittest discover -s tests (clean git archive export of d6049e2 at 10:10Z)` | Ran 43 tests in 14.340s, OK (skipped=5: four corpus disk tests incl. the publication-ledger test, and the snapshot disk test) | Own observation. Unit level only; it reads the five real snapshots read-only in test_snapshots_verify_parity_and_traces. |
+| `q005-reviewer-disk-d6049e2` | disk | pass | Q-005 corpus reviewer (independent of the corpus worker) | yes | 2026-11-03 | `d6049e2` | `CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests` | Ran 43 tests in 16.007s, OK (in-memory run: 13.174s, OK, skipped=5) | Recorded in reviews/corpus-pilot-review-v0.1.md by its independent reviewer; accepted by the parent as independent evidence for d6049e2 (Q-019 S4). Not re-run by the atlas worker. Historical once the baseline moved to 94af111. |
+| `backend-fix-disk-94af111` | disk | pass | Backend fix worker, task 44ddaeb1 (Q-001 fix round) | no (UNVERIFIED) | 2026-11-03 | `94af111` | `CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests` | Ran 59 tests, OK (in-memory: 59, OK, skipped=17) | UNVERIFIED as a claimant report: CHECKPOINT.md and docs/CORPUS-REVIEW-v0.1-DISPOSITION.md at 94af111. |
+| `q020-disk-94af111` | disk | pass | Q-020 review sub-agent (independent of fix task 44ddaeb1) | yes | 2026-11-03 | `94af111` | `CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests -v (live checkout at 94af111; only QUEUE.md modified)` | Ran 59 tests in 30.048s, OK, 0 skipped | Recorded in reviews/corpus-pilot-review-v0.2.md by the independent reviewer; recorded with read_back true on the parent's instruction. The same review keeps Q-005 B2 open (its R1), so this run is test evidence, not acceptance. |
+| `q021-inmemory-94af111` | unit | pass | Atlas repair worker (Q-021) | yes | 2026-11-03 | `94af111` | `<venv>/python -B -m unittest discover -s tests (clean git archive export of 94af111 at 11:02Z)` | Ran 59 tests in 14.890s, OK (skipped=17) | Own observation. |
+| `backend-q022-disk-63f4221` | disk | pass | Q-022 backend fix worker (Q-020 R1-R5 round) | no (UNVERIFIED) | 2026-11-03 | `63f4221` | `CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests (forward and reversed order)` | Ran 70 tests, OK (59 + 11 new in tests/test_store_reads.py); 11/11 new fail on a 94af111 export | UNVERIFIED as a claimant report: commit message of 63f4221 and docs/CORPUS-REVIEW-v0.2-DISPOSITION.md. |
+| `q021-disk-63f4221` | disk | pass | Atlas repair worker (Q-021) | yes | 2026-11-03 | `63f4221` | `CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests (clean git archive export of 63f4221)` | Ran 70 tests in 40.735s, OK, 0 skipped. Real store fingerprint (266 entries: snapshots, derived/cohorts, derived/exports, receipts) identical before and after; ledger SHA-256 6d359b74… unchanged. | Own observation. Test evidence for the code, not acceptance of the publication guarantee. |
+| `q021-inmemory-63f4221` | unit | pass | Atlas repair worker (Q-021) | yes | 2026-11-03 | `63f4221` | `<venv>/python -B -m unittest discover -s tests (clean git archive export of 63f4221)` | Ran 70 tests in 14.325s, OK (skipped=28) | Own observation. |
+| `review-v03-disk-63f4221` | disk | pass | Final publication review c5df3251 (independent of the Q-022 fix worker) | yes | 2026-11-03 | `63f4221` | `CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests -v (clean git archive export of 63f4221), plus reversed order and the 11 store-read tests one by one` | Ran 70 tests in 40.787s, OK, 0 skipped; reversed 70 OK, 0 skipped; 11/11 isolated OK. Real-store fingerprint 266 entries, 0 differences; ledger SHA-256 6d359b74… unchanged. | Recorded from reviews/corpus-pilot-review-v0.3.md §8 and §7 on the parent's instruction (independent reviewer). Not re-run by the atlas worker; its own run q021-disk-63f4221 gives the same 70 OK. |
+
+### Corpus snapshots (evidence eligibility)
+
+Only `accepted` snapshots may be cited as `corpus_evidence`. `--runtime` reads each cited one with the checker's own reader (`corpus-evidence-reader-1`): ledger record, pinned manifest digest, every payload hash, and row counts from the hashed Parquet, then cross-checks the backend read verifier. Incident and pending-review snapshots are listed so that they cannot be cited by mistake.
+
+| Snapshot | Status | Source | Ledger | Writer code | Accepted by | Note |
+|---|---|---|---|---|---|---|
+| `snapshot:5e51403b0d7dcdb90cb429d444e6a23b` | accepted | oracc-selection | ledgered | 94af111 | reviews/corpus-pilot-review-v0.2.md, reviews/corpus-pilot-review-v0.3.md | ORACC ccpo rebuilt by adapter oracc-cdl-2 (Q-005 F4 fix), ledger format 2 reserve/commit at 10:36:22Z. Q-020 (v0.2 §7) verified its content and all 4,544 IN_SENSE source links against the raw nodes; v0.3 verified it ledgered and bytes-bound at 63f4221 and accepted the publication for the pilot. Its sense provenance supersedes edaab55c. Not yet cited as corpus_evidence (edaab55c counts are equal and remain cited). |
+| `snapshot:c316e7cbbaf8a7fca7705f0efa5c4a07` | accepted | ebl-cohort | legacy-backfilled | d6049e2 | reviews/atlas-recheck-v0.1.md | eBL∩ccpo P-number cohort (51 records). Published once; ledger row backfilled at ~09:59Z. Q-019 recounted every cited count from copies of its rows (0 mismatches). Q-005 accepted the pilot data surfaces. |
+| `snapshot:edaab55c1a39cc65ad7c76e6d12547a7` | accepted | oracc-selection | legacy-backfilled | d6049e2 | reviews/atlas-recheck-v0.1.md | ORACC ccpo, adapter oracc-cdl-1, 51 texts. Counts recounted by Q-019 and still valid. Superseded by snapshot:5e51403b for sense provenance: 1,309 Sense rows carry an instance sig (Q-005 F4), which is not the oracc-cdl-2 contract. Kept, never deleted. |
+| `snapshot:fc7c350439f9edfee61b5f35bdd4d65a` | accepted | cdli-selection | legacy-backfilled | d6049e2 | reviews/atlas-recheck-v0.1.md | CDLI artifact JSON selection, 51 artifacts, catalog claims only (0 edges). Counts recounted by Q-019. |
+| `snapshot:84971360d212834e0b7acbeac1e56abe` | incident | ebl-cohort | legacy-backfilled | d6049e2 | — | Deleted and rebuilt under the same ID at ~09:46Z (UI review F-4). First-version bytes not retained. Never evidence; kept, never deleted. |
+| `snapshot:ce127437339109285185a534145edf50` | incident | ebl | legacy-backfilled | d6049e2 | — | Deleted and rebuilt under the same ID at ~09:46Z (UI review F-4). First-version bytes not retained. Never evidence; kept, never deleted. |
 
 ### Runtime coverage
 
@@ -128,10 +156,10 @@ Immutable raw bytes, source records, snapshot bindings, manifests, rights and ac
 | `table:registry` | table | documented | code | corpus | unit | table `registry` | — |
 | `table:rejection` | table | specified | code | synthetic | unit | table `rejection` | — |
 | `table:exclusion` | table | specified | code | corpus | unit | table `exclusion` | — |
-| `artifact:snapshot-manifest` | artifact | specified | code | synthetic | disk (UNVERIFIED) | `cuneiform/storage.py::materialize`, `cuneiform/storage.py::verify`, `cuneiform/storage.py::snapshot_identity`, `cuneiform/storage.py::import_source`, `cuneiform/storage.py::import_cohort` | Q-012, Q-001, Q-005 |
-| `artifact:publication-ledger` | artifact | documented | code | none | disk (UNVERIFIED) | `cuneiform/storage.py::publish`, `cuneiform/storage.py::assert_unpublished`, `cuneiform/storage.py::LEDGER` | Q-001, Q-005 |
+| `artifact:snapshot-manifest` | artifact | specified | code | synthetic | disk | `cuneiform/storage.py::StoreEntry`, `cuneiform/storage.py::import_cohort`, `cuneiform/storage.py::import_source`, `cuneiform/storage.py::materialize`, `cuneiform/storage.py::snapshot_identity`, `cuneiform/storage.py::store_entry`, `cuneiform/storage.py::verified`, `cuneiform/storage.py::verify`, `cuneiform/storage.py::verify_content` | Q-012, Q-001, Q-005 |
+| `artifact:publication-ledger` | artifact | documented | code | none | disk | `cuneiform/publication.py::LEDGER`, `cuneiform/publication.py::Ledger`, `cuneiform/publication.py::PublicationError`, `cuneiform/publication.py::adopt`, `cuneiform/publication.py::build_lock`, `cuneiform/publication.py::check_published`, `cuneiform/publication.py::locate_entry`, `cuneiform/publication.py::missing_entry`, `cuneiform/publication.py::publish_dir`, `cuneiform/publication.py::recover`, `cuneiform/storage.py::LEDGER`, `cuneiform/storage.py::StoreEntry`, `cuneiform/storage.py::existing_snapshot`, `cuneiform/storage.py::publish`, `cuneiform/storage.py::resolve_snapshot`, `cuneiform/storage.py::store_entry`, `cuneiform/storage.py::store_path`, `cuneiform/storage.py::verified` | Q-001, Q-005, Q-020, Q-022 |
 | `artifact:acquisition-receipt` | artifact | documented | code | none | none | `cuneiform/acquire.py::acquire`, `cuneiform/acquire.py::write_receipt`, `cuneiform/acquire.py::verify_raw` | Q-005, Q-013 |
-| `artifact:cohort-manifest` | artifact | documented | code | none | disk (UNVERIFIED) | `cuneiform/corpus.py::build_cohort`, `cuneiform/corpus.py::verify_cohort`, `cuneiform/corpus.py::iter_array` | Q-005, Q-012 |
+| `artifact:cohort-manifest` | artifact | documented | code | none | disk | `cuneiform/corpus.py::build_cohort`, `cuneiform/corpus.py::iter_array`, `cuneiform/corpus.py::verify_cohort`, `cuneiform/storage.py::import_cohort` | Q-005, Q-012, Q-020, Q-022 |
 | `artifact:selection-manifest` | artifact | documented | code | none | none | `cuneiform/oracc.py::import_project`, `cuneiform/cdli_api.py::import_artifacts` | Q-005, Q-011, Q-013 |
 | `concept:rights-ledger` | concept | specified | code | none | unit | `cuneiform/adapters.py::RIGHTS`, `cuneiform/cdli_api.py::RIGHTS` | Q-011, Q-012, Q-013, Q-005 |
 | `value:SourceLocator` | value | documented | code | none | unit | `cuneiform/model.py::SourceLocator`, `cuneiform/query.py::trace_rows` | — |
@@ -233,19 +261,19 @@ Accounted exclusions inside accepted records: non-token ATF lines, unsupported c
 Per-snapshot manifest: identity inputs, contract, versions, rights, payload hashes, counts and build measurements. Built by storage.materialize for every source kind; layout raw / manifest.json / graph.duckdb / parquet/<table>.parquet plus cohort.json or selection.json when bound.
 
 - **Identity:** New snapshots: snapshot_identity(namespace, source, raw_sha256, schema, parser, record_id, source_url, projection_spec) with contract 'manifest-3' included. The five pilot snapshots predate manifest-3 and keep the legacy formula (their ledger rows record snapshot_contract null). Paths and timestamps are excluded.
-- **Versioning:** Immutable. Published once through the publication ledger (artifact:publication-ledger); a revision gets a new ID. Schema-1 manifests verify under their original inventory contract.
+- **Versioning:** Immutable. Published once through the publication ledger (artifact:publication-ledger); a revision gets a new ID. Schema-1 manifests verify under their original inventory contract. At 63f4221 store membership is decided from the lexical and the resolved parent: a directory in or resolving into a store is ledger-checked, a symlinked or misplaced store entry is refused, and store_path/resolve_snapshot return a StoreEntry read with ledger='require' and its own ID. Copies outside every store stay content-only and labelled standalone-not-ledger-checked. The read contract changed; the manifest keys did not. Accepted at 63f4221 for the authorized local cooperating-writer pilot by the independent final review (reviews/corpus-pilot-review-v0.3.md, review c5df3251): R1-R5 closed. Not proven beyond that scope.
 - **Provenance:** manifest_sha256 detects inconsistent edits; it is not authentication against coordinated rewrites.
 - **Temporal:** retrieved_or_imported_at is system (ingestion) time in UTC. It is excluded from identity. See temporal:system-time.
-- **Coverage:** Five real pilot snapshots verified read-only on 2026-11-03 by the atlas worker (storage.verify re-hashes every payload file): three published once (eBL∩ccpo cohort c316e7cb, ORACC ccpo edaab55c, CDLI fc7c3504) and two rebuilt under the same ID during the incident (ce127437, 84971360). Their counts are evidence of rows, not of publication integrity.
+- **Coverage:** Six real snapshots in the store: four accepted as evidence (eBL∩ccpo cohort c316e7cb, ORACC ccpo edaab55c, CDLI fc7c3504, and the oracc-cdl-2 rebuild 5e51403b, accepted by v0.3), two rebuilt under the same ID during the incident (ce127437, 84971360). See corpus_snapshots. Counts are evidence of rows; publication integrity is the ledger's pilot-scope guarantee.
 - **Evidence notes:** Disk level rests on the corpus worker's own run at d6049e2 (UNVERIFIED, not read back) and, historically, on the parent's 2ab620b run. The atlas worker observed only the in-memory suite at d6049e2. The manifest is not rows, so its populated level is not raised to corpus; the five verified real manifests are listed under coverage.
 - **Files:** `cuneiform/storage.py`, `cuneiform/oracc.py`, `cuneiform/cdli_api.py`
 - **Evidence:** `tests/test_disk_delivery.py::test_snapshot_idempotence_relocation_parquet_and_tamper`, `tests/test_review_regressions.py::test_incomplete_manifest_rejected`, `tests/test_projections.py::test_variable_manifest_inventory_without_disk`, `tests/test_corpus_pilot.py::test_ledger_read_only_and_contract_identity`, `tests/test_corpus_pilot.py::test_snapshots_verify_parity_and_traces`
-- **Verified by:** `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`); `parent-full-disk-2ab620b` (Parent orchestrator, 2026-11-03, code `2ab620b`)
+- **Verified by:** `review-v03-disk-63f4221` (Final publication review c5df3251 (independent of the Q-022 fix worker), 2026-11-03, code `63f4221`); `q021-disk-63f4221` (Atlas repair worker (Q-021), 2026-11-03, code `63f4221`); `backend-q022-disk-63f4221` (Q-022 backend fix worker (Q-020 R1-R5 round), 2026-11-03, code `63f4221`); `q020-disk-94af111` (Q-020 review sub-agent (independent of fix task 44ddaeb1), 2026-11-03, code `94af111`); `backend-fix-disk-94af111` (Backend fix worker, task 44ddaeb1 (Q-001 fix round), 2026-11-03, code `94af111`); `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`); `parent-full-disk-2ab620b` (Parent orchestrator, 2026-11-03, code `2ab620b`)
 - **Sources:** docs/INGESTION-DESIGN.md, CHECKPOINT.md
 
 | Field | Type | Nullable | Key | Note |
 |---|---|---|---|---|
-| `snapshot_contract` | string | — | — | 'manifest-3'; part of new snapshot IDs. Absent from the five pilot manifests (legacy identity). |
+| `snapshot_contract` | string | — | — | 'manifest-3'; part of new snapshot IDs. Absent from the five pilot manifests (legacy identity); legacy_absent lets the runtime check accept that. |
 | `projection_spec` | object | — | — | {revision, config} bound into snapshot identity. |
 | `snapshot_id` | string | — | — | — |
 | `schema_version` | string | — | — | — |
@@ -255,7 +283,7 @@ Per-snapshot manifest: identity inputs, contract, versions, rights, payload hash
 | `source_url` | string\|null | — | — | Caller-supplied citation; not verified. |
 | `record_id` | string\|null | — | — | — |
 | `rights` | object | — | — | adapters.RIGHTS[source] for import_source; per-snapshot statement for selections and cohorts (see concept:rights-ledger). Not a legal grant. |
-| `adapter` | string | — | — | optional, only for cdli-selection, oracc-selection; Adapter contract, e.g. oracc-cdl-1, cdli-artifact-json-1. |
+| `adapter` | string | — | — | optional, only for cdli-selection, oracc-selection; Adapter contract, e.g. oracc-cdl-1 (edaab55c), oracc-cdl-2 (94af111 and later: sense-key locators, per-occurrence sig on IN_SENSE), cdli-artifact-json-1. |
 | `cohort` | object | — | — | optional, only for ebl-cohort; cohort_id, manifest_sha256, size, rule, parent; bound to cohort.json by hash. |
 | `selection` | object | — | — | optional, only for cdli-selection, oracc-selection; selection_id, manifest_sha256, size, parent; bound to selection.json by hash. |
 | `ingestion` | object | — | — | optional, only for cdli-selection, ebl-cohort, oracc-selection; Record/rejection/batch statistics of the import. |
@@ -274,15 +302,16 @@ Per-snapshot manifest: identity inputs, contract, versions, rights, payload hash
 
 #### `artifact:publication-ledger` — Snapshot publication ledger (.publication-ledger.jsonl)
 
-Append-only ledger under an exclusive lock. An ID that was ever published can never be published again, even after deletion. Published trees are made read-only (files 0444, directories 0555).
+Append-only publication ledger under an exclusive lock (cuneiform/publication.py, format 2). Writers fsync a `reserve` (binding manifest_sha256 and the manifest.json bytes) before the rename, then a `commit`; interrupted publications fail closed until an explicit publication-recover. Guarantee: an ID that was ever published is never served or published with other bytes, for cooperating writers on one host. Accepted at 63f4221 for the authorized local cooperating-writer pilot by the independent final review (reviews/corpus-pilot-review-v0.3.md, review c5df3251): R1-R5 closed. Not proven beyond that scope.
 
-- **Provenance:** Added after the same-ID rebuild incident (UI review F-4): at ~09:44Z on 2026-11-03 snapshots ce127437 and 84971360 were published, deleted at ~09:46Z and rebuilt under the same IDs. First-version bytes were not retained. Incident record: ~/.local/share/cuneiform-research/evidence/incident-2026-11-03-same-id-rebuild.json.
-- **Uncertainty:** The safeguards (ledger refusal, read-only trees, manifest-3 identity) are tested only by a disk-gated test that the implementer ran. They need independent review (Q-005) before they count as verified. The pre-incident bytes of the two rebuilt snapshots are unrecoverable.
-- **Coverage:** Five rows, all backfilled at ~09:59Z; the two rebuilt snapshots carry an incident note. Read back by the atlas worker. Rows are file entries, not table rows, so populated stays none.
-- **Files:** `cuneiform/storage.py`
-- **Evidence:** `tests/test_corpus_pilot.py::test_ledger_read_only_and_contract_identity`
-- **Verified by:** `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`)
-- **Sources:** CHECKPOINT.md
+- **Versioning:** Format 1: legacy rows with no event key (the d6049e2 publisher and the 2026-11-03 backfill of the five pilot snapshots), read as published. Format 2 (94af111): reserve, commit, abort, abandon, adopt and torn-tail-acknowledged events; 63f4221 adds no event kind. The cohort ledger under derived/cohorts uses the same format, reached through publication-* --store cohorts. Historical rows are never rewritten. The checker reads both formats itself (corpus-evidence-reader-1).
+- **Provenance:** Added after the same-ID rebuild incident (UI review F-4): at ~09:44Z on 2026-11-03 snapshots ce127437 and 84971360 were published, deleted at ~09:46Z and rebuilt under the same IDs. First-version bytes were not retained, and no copy of them is known. Incident record: ~/.local/share/cuneiform-research/evidence/incident-2026-11-03-same-id-rebuild.json. Both IDs are kept and listed as incident in corpus_snapshots; they are never evidence.
+- **Uncertainty:** Q-005 blockers at d6049e2: B1 crash window after the rename allowed a same-ID republish; B2 reads never consulted the ledger; B3 failed-publish cleanup masked the error. Q-020 (reviews/corpus-pilot-review-v0.2.md) closed B1 and B3 at 94af111 and kept B2 open on its R1 (a symlinked store entry served as standalone-not-ledger-checked), with R2 (cohort reads), R3 (reserve->commit window), R4 (untyped absent entries) and R5 (seal fsync order). Accepted at 63f4221 for the authorized local cooperating-writer pilot by the independent final review (reviews/corpus-pilot-review-v0.3.md, review c5df3251): R1-R5 closed. Not proven beyond that scope. Writer changes: store membership from the lexical and resolved parent; symlinked or escaping entries, payload symlinks and misplaced IDs refused with symlinked-entry or misplaced before hashing; StoreEntry reads always ledger=require with expected_sid; a writer that finds reserved waits on the per-ID build lock; typed refusals for absent entries; seal fsyncs after the final modes. fsync_dir still ignores OSError. Limits stated by the protocol: cooperating writers on one host; same-owner edits, ledger deletion and root are not prevented; symlink checks are time-of-read; the ledger is not a signature. Open, non-blocking (v0.3 §9): N1 a reader refusal inside a live reserve window says the writer is gone (wording; the read still fails closed); N2 API cohort reads default to auto and label pre-ledger cohorts standalone (wording); N3 publication-clean-stage is guarded by age only. Not tested: same-owner tampering, root, multi-host, real power loss (crashes are process kills).
+- **Coverage:** Seven rows at 63f4221 (read by the atlas worker; ledger SHA-256 6d359b74… is unchanged since 94af111): five legacy rows backfilled at ~09:59Z (two carry the incident note) and one reserve plus one commit for snapshot:5e51403b at 10:36:22Z. Readers label the five ledgered-legacy-backfilled; their published_at is the manifest build time copied by the backfill, and their manifest.json file bytes are not bound (canonical digest only). derived/cohorts has no ledger or lock yet: its three cohorts read as unledgered-pre-ledger-cohort-store. Building any new cohort there creates the cohort ledger, after which those three are refused until the owner adopts them (writer statement, not done). Rows are file entries, not table rows, so populated stays none.
+- **Files:** `cuneiform/publication.py`, `cuneiform/storage.py`, `cuneiform/corpus.py`, `docs/PUBLICATION-PROTOCOL.md`
+- **Evidence:** `tests/test_publication.py::test_kill_after_rename_fails_closed_then_delete_cannot_republish`, `tests/test_publication.py::test_replaced_build_refused_restoration_bound_standalone_labelled`, `tests/test_publication.py::test_rename_failure_raises_original_error_and_leaves_no_stage`, `tests/test_publication.py::test_states_and_conflicts`, `tests/test_corpus_pilot.py::test_ledger_read_only_and_contract_identity`, `tests/test_store_reads.py::test_symlinked_entry_same_id_different_bytes_refused_everywhere`, `tests/test_store_reads.py::test_id_x_never_resolves_to_snapshot_y`, `tests/test_store_reads.py::test_nested_path_forms`, `tests/test_store_reads.py::test_dangling_symlink_and_symlinked_dest_on_writer_and_recovery_side`, `tests/test_store_reads.py::test_absent_entry_refusals_are_typed`, `tests/test_store_reads.py::test_writer_and_recovery_inside_live_reserve_commit_window`, `tests/test_store_reads.py::test_seal_fsyncs_after_final_modes`
+- **Verified by:** `review-v03-disk-63f4221` (Final publication review c5df3251 (independent of the Q-022 fix worker), 2026-11-03, code `63f4221`); `q021-disk-63f4221` (Atlas repair worker (Q-021), 2026-11-03, code `63f4221`); `backend-q022-disk-63f4221` (Q-022 backend fix worker (Q-020 R1-R5 round), 2026-11-03, code `63f4221`); `q020-disk-94af111` (Q-020 review sub-agent (independent of fix task 44ddaeb1), 2026-11-03, code `94af111`); `backend-fix-disk-94af111` (Backend fix worker, task 44ddaeb1 (Q-001 fix round), 2026-11-03, code `94af111`); `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`)
+- **Sources:** CHECKPOINT.md, docs/PUBLICATION-PROTOCOL.md, docs/CORPUS-REVIEW-v0.1-DISPOSITION.md, docs/CORPUS-REVIEW-v0.2-DISPOSITION.md, reviews/corpus-pilot-review-v0.3.md
 
 #### `artifact:acquisition-receipt` — Acquisition receipt and content-addressed raw store
 
@@ -299,11 +328,12 @@ Allowlisted, checksum-verified download into a read-only raw/sha256 store with a
 Deterministic rule-selected cohort (usable-text-v1, order sha256(parent_sha256 + ':' + _id)) with byte-identical parent slices, exclusion accounting and a self-hash. Bound into ebl-cohort snapshots by hash.
 
 - **Scope:** A cohort is a filtered, hash-ordered sample (20,896 of 23,289 records eligible), not representative corpus statistics.
-- **Coverage:** Three cohorts: 30, 300 and the 51-record eBL∩ccpo P-number cohort (SOURCE-AUDIT).
-- **Files:** `cuneiform/corpus.py`
-- **Evidence:** `tests/test_corpus_pilot.py::test_cohort_determinism_prefix_trace_tamper_and_chunked_parity`, `tests/test_corpus_pilot.py::test_exact_byte_ranges_across_tiny_chunks_and_envelopes`
-- **Verified by:** `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`)
-- **Sources:** docs/SOURCE-AUDIT.md
+- **Uncertainty:** Q-020 R2 (cohort reads not ledger-bound, no cohort recovery path). At 63f4221 the writer made verify_cohort(dir, parent, ledger=auto|store|require|skip) ledger-checked; corpus-audit and corpus-import read with ledger='store', import_cohort checks before building, build_cohort holds a per-ID build lock, and publication-* --store cohorts is the explicit recovery and adoption path. Accepted at 63f4221 for the authorized local cooperating-writer pilot by the independent final review (reviews/corpus-pilot-review-v0.3.md, review c5df3251): R1-R5 closed. Not proven beyond that scope. Each snapshot binds its own cohort.json by hash, which remains the authoritative copy. Prerequisite before any future cohort build in the real store: the owner must explicitly adopt cohort-4e86952e…, cohort-9abad6ce… and cohort-ea91baae… (publication-adopt --store cohorts). A build creates the cohort ledger, after which unadopted cohorts are refused. Not done; no cohort was built (v0.3 §7, §11; parent).
+- **Coverage:** Three cohorts: 30, 300 and the 51-record eBL∩ccpo P-number cohort (SOURCE-AUDIT). They predate the cohort ledger: derived/cohorts has no ledger or lock, so reads label them unledgered-pre-ledger-cohort-store (ledger='store') and require-mode reads refuse them. New cohorts are ledgered there and sealed read-only.
+- **Files:** `cuneiform/corpus.py`, `cuneiform/publication.py`
+- **Evidence:** `tests/test_corpus_pilot.py::test_cohort_determinism_prefix_trace_tamper_and_chunked_parity`, `tests/test_corpus_pilot.py::test_exact_byte_ranges_across_tiny_chunks_and_envelopes`, `tests/test_store_reads.py::test_kill_after_rename_cohort_refused_then_recovered_with_byte_binding`, `tests/test_store_reads.py::test_kill_after_reserve_cohort_complete_and_discard`, `tests/test_store_reads.py::test_unrecorded_symlinked_misplaced_and_pre_ledger_cohorts`, `tests/test_store_reads.py::test_concurrent_cohort_builders_build_once`
+- **Verified by:** `review-v03-disk-63f4221` (Final publication review c5df3251 (independent of the Q-022 fix worker), 2026-11-03, code `63f4221`); `q021-disk-63f4221` (Atlas repair worker (Q-021), 2026-11-03, code `63f4221`); `backend-q022-disk-63f4221` (Q-022 backend fix worker (Q-020 R1-R5 round), 2026-11-03, code `63f4221`); `q020-disk-94af111` (Q-020 review sub-agent (independent of fix task 44ddaeb1), 2026-11-03, code `94af111`); `backend-fix-disk-94af111` (Backend fix worker, task 44ddaeb1 (Q-001 fix round), 2026-11-03, code `94af111`); `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`)
+- **Sources:** docs/SOURCE-AUDIT.md, docs/CORPUS-REVIEW-v0.2-DISPOSITION.md
 
 #### `artifact:selection-manifest` — ORACC / CDLI selection manifest (selection.json)
 
@@ -321,7 +351,8 @@ Rights status copied into every manifest: a per-namespace registry (adapters.RIG
 - **Uncertainty:** No status is resolved. Text, annotations, translations, images and code carry separate terms.
 - **Notes:** Not a table: populated stays none because the registry is a code constant. The five pilot manifests carry unresolved-conflict (eBL), source-stated (ORACC) and source-stated-terms (CDLI), read back by the atlas worker.
 - **Values:** ebl: unresolved-conflict (Zenodo CC BY 4.0 vs data paper CC BY-NC-SA 4.0); ebl-atf: unknown; cdli: unknown; oracc: unverified-project; ebl-cohort: Alias of ebl (RIGHTS['ebl-cohort'] = RIGHTS['ebl']): unresolved-conflict. import_cohort prefers the cohort manifest's rights, which copy the parent receipt.
-- **Per-snapshot rights sources:** `oracc-selection`: Per-snapshot statement written by oracc.import_project: each ccpo file states 'released under the CC0 license'; the documentation footer says CC BY-SA 3.0. Recorded, not legally reviewed.; `cdli-selection`: Per-snapshot statement cdli_api.RIGHTS: cdli.earth Terms of Use (academic reuse of transliterations and translations with attribution; images non-commercial). Catalog metadata not separately licensed. Not legally reviewed.
+- **Per-snapshot rights sources:** `cdli-selection`: Per-snapshot statement cdli_api.RIGHTS: cdli.earth Terms of Use (academic reuse of transliterations and translations with attribution; images non-commercial). Catalog metadata not separately licensed. Not legally reviewed.; `ebl-cohort`: Per-snapshot statement written by storage.import_cohort: the cohort manifest's rights (copied from the parent receipt) or, if absent, RIGHTS['ebl']. The five pilot cohort manifests carry unresolved-conflict. Recorded, not legally reviewed. Hash moved at 63f4221 (was 84c9938a…) only because the fingerprinted binding of cohort became verify_cohort(cohort_dir, parent_path, ledger=cohort_ledger); the rights expression and every literal it reads are unchanged (AST text compared at 94af111 and 63f4221 by the atlas worker). No grant widened.; `oracc-selection`: Per-snapshot statement written by oracc.import_project: each ccpo file states 'released under the CC0 license'; the documentation footer says CC BY-SA 3.0. Recorded, not legally reviewed.
+- **Expected rights status by source kind:** `cdli`: unknown; `cdli-selection`: source-stated-terms; `ebl`: unresolved-conflict; `ebl-atf`: unknown; `ebl-cohort`: unresolved-conflict; `oracc`: unverified-project; `oracc-selection`: source-stated
 - **Files:** `cuneiform/adapters.py`, `cuneiform/oracc.py`, `cuneiform/cdli_api.py`, `sources/rights/ebl-zenodo-10018951.json`
 - **Evidence:** `tests/test_trace_and_admission.py::test_trace_resolves_source_and_unknowns`
 - **Sources:** SPEC-v0.2.md §3, docs/INGESTION-DESIGN.md
@@ -732,7 +763,7 @@ Disposable projections and query recipes over canonical rows: ordered positions,
 | `table:projection_registry` | table | documented | code | corpus | unit | table `projection_registry` | — |
 | `value:match-span-id` | value | specified | code | sample | unit | `cuneiform/query.py::motif`, `cuneiform/projections.py::build` | — |
 | `query:motif` | query | specified | code | none | unit | `cuneiform/query.py::motif`, `cuneiform/query.py::array_count` | Q-010, Q-017 |
-| `query:lookup` | query | documented | code | none | unit | `cuneiform/projections.py::lookup`, `cuneiform/projections.py::source_span`, `cuneiform/projections.py::coverage`, `cuneiform/projections.py::report`, `cuneiform/persisted.py::lookup_snapshot` | Q-008, Q-010, Q-005 |
+| `query:lookup` | query | documented | code | none | unit | `cuneiform/persisted.py::LayerUnavailable`, `cuneiform/persisted.py::ScopeMismatch`, `cuneiform/persisted.py::lookup_snapshot`, `cuneiform/projections.py::coverage`, `cuneiform/projections.py::lookup`, `cuneiform/projections.py::report`, `cuneiform/projections.py::source_span` | Q-008, Q-010, Q-005 |
 | `query:trace` | query | specified | code | none | unit | `cuneiform/query.py::trace`, `cuneiform/query.py::trace_rows`, `cuneiform/oracc.py::trace_word` | Q-010, Q-005 |
 | `value:snapshot-scope` | value | documented | code | none | unit | `cuneiform/persisted.py::scope` | Q-005, Q-008 |
 | `node:Pattern` | node | specified | none | none | none | — | Q-010, Q-017 |
@@ -861,15 +892,16 @@ Exact / '?' / bounded-skip (0–2 represented positions before last item) motif 
 
 Named recipes: postings, motifs, span, sequence, occurrence, reverse-postings, reverse-motifs, aliases, catalog, translations, neighbors, nodes, words and lemmas. Default 20 / max 100 rows with truncation and next_offset. Lookups on a persisted snapshot also return its scope (value:snapshot-scope).
 
-- **Notes:** Candidate backing for MCP read tools and the UI.
+- **Notes:** Candidate backing for MCP read tools and the UI. Since 94af111: persisted.ScopeMismatch for a namespace/snapshot override that cannot match; persisted.LayerUnavailable when the layer table is empty (an empty table means the layer is unavailable, never zero); a loaded layer with no match returns rows []. Each call verifies the snapshot once; latency_ms is query-only (latency_scope) and timing adds verify_ms, query_ms and end_to_end_ms. At 63f4221 lookup_snapshot, query.connect and query.trace refuse a symlinked store entry (symlinked-entry) on both the plain path and the StoreEntry (writer-tested).
 - **Files:** `cuneiform/projections.py`, `cuneiform/persisted.py`, `cuneiform/cli.py`
-- **Evidence:** `tests/test_projections.py::test_trace_and_reverse_navigation`, `tests/test_projections.py::test_caps_configuration_and_atomic_failure`, `tests/test_corpus_pilot.py::test_words_lemmas_senses_and_claims_without_invented_translation`
+- **Evidence:** `tests/test_projections.py::test_trace_and_reverse_navigation`, `tests/test_projections.py::test_caps_configuration_and_atomic_failure`, `tests/test_corpus_pilot.py::test_words_lemmas_senses_and_claims_without_invented_translation`, `tests/test_publication.py::test_lookup_verifies_once_labels_latency_and_types_errors`
 - **Sources:** docs/REPRESENTATION-MAP.md
 
 #### `query:trace` — Evidence trace
 
 Occurrence → raw bytes round-trip with source binding/hash and whole-record checks; returns edges and unaligned in-sequence translations. For cohort snapshots it also resolves the byte span in the original parent file (parent_trace); oracc.trace_word does the same for ORACC words. Occurrence traces return empty words/senses/images.
 
+- **Notes:** Since 94af111 a trace returns timing (and parent_trace_ms for cohorts) and the publication label of the snapshot it read.
 - **Files:** `cuneiform/query.py`, `cuneiform/oracc.py`
 - **Evidence:** `tests/test_trace_and_admission.py::test_trace_resolves_source_and_unknowns`, `tests/test_linked_review.py::test_wrong_source_and_manifest_rejected`, `tests/test_corpus_pilot.py::test_snapshots_verify_parity_and_traces`
 - **Sources:** SPEC-v0.2.md §6, SPEC-v0.2.md §9
@@ -878,7 +910,7 @@ Occurrence → raw bytes round-trip with source binding/hash and whole-record ch
 
 Returned with every persisted lookup: scope kind (single input, rule-selected cohort, selection), cohort size and eligible/parent denominators, so counts are never read as corpus-wide statistics.
 
-- **Notes:** Derived from the manifest, not rows. For the 300 cohort: 'rule-selected cohort', 300 of 20,896 eligible, 23,289 parent records.
+- **Notes:** Derived from the manifest, not rows. For the 300 cohort: 'rule-selected cohort', 300 of 20,896 eligible, 23,289 parent records. Since 94af111 scope also reports publication (the ledger label), identity_formula and input_identity (the contract-independent legacy-formula ID of the inputs, for grouping a legacy snapshot with a manifest-3 rebuild without merging them; ORACC pairs differ because the adapter is part of the selection ID).
 - **Files:** `cuneiform/persisted.py`
 - **Evidence:** `tests/test_corpus_pilot.py::test_snapshots_verify_parity_and_traces`
 - **Sources:** CHECKPOINT.md
@@ -965,6 +997,7 @@ Namespaced dictionary entry from ORACC lemmatization: citation form, language, P
 
 - **Identity:** identity('lemma', namespace, snapshot, language, citation form, guideword, POS): snapshot-scoped, never merged across snapshots.
 - **Coverage:** ORACC ccpo: 1,122 lemmas from 4,544 lemmatized word instances.
+- **Notes:** Lemma.source_record_id still points at the first attesting text (schema NOT NULL, no project-level record); deferred schema change per Q-005 F4. Corpus evidence is snapshot:edaab55c (oracc-cdl-1, written by d6049e2); its counts are valid, but it is superseded by the accepted oracc-cdl-2 rebuild snapshot:5e51403b for sense provenance (same counts per Q-020; accepted by v0.3).
 - **Files:** `cuneiform/schema.sql`, `cuneiform/oracc.py`
 - **Evidence:** `tests/test_foundation.py::test_oracc_explicitly_not_verified`, `tests/test_corpus_pilot.py::test_words_lemmas_senses_and_claims_without_invented_translation`
 - **Corpus evidence:** `snapshot:edaab55c1a39cc65ad7c76e6d12547a7` lemma=1122 (read by Q-007/Q-018 atlas worker (read-only storage.verify + manifest counts / exported edge Parquet), 2026-11-03)
@@ -995,7 +1028,9 @@ WordToken → Lemma as asserted by the ORACC lemmatization (signature, instance,
 Dictionary sense under a lemma: guideword and contextual English sense from ORACC. A gloss is a lexical gloss, never a translation.
 
 - **Identity:** identity('sense', lemma_id, sense string).
+- **Provenance:** oracc-cdl-1 (edaab55c) put an instance sig in source_locator for 1,309 shared Sense rows (Q-005 F4). oracc-cdl-2 (94af111) uses a sense-key locator (project, lemma key, sense) and a labelled first-attestation pointer, never an instance sig; per-occurrence sigs are on edge:IN_SENSE.
 - **Coverage:** ORACC ccpo: 1,317 senses.
+- **Notes:** Corpus evidence is snapshot:edaab55c (oracc-cdl-1, written by d6049e2); its counts are valid, but it is superseded by the accepted oracc-cdl-2 rebuild snapshot:5e51403b for sense provenance (same counts per Q-020; accepted by v0.3).
 - **Files:** `cuneiform/schema.sql`, `cuneiform/oracc.py`
 - **Evidence:** `tests/test_foundation.py::test_deterministic_ids_and_empty_unavailable_layers`, `tests/test_corpus_pilot.py::test_words_lemmas_senses_and_claims_without_invented_translation`
 - **Corpus evidence:** `snapshot:edaab55c1a39cc65ad7c76e6d12547a7` sense=1317 (read by Q-007/Q-018 atlas worker (read-only storage.verify + manifest counts / exported edge Parquet), 2026-11-03)
@@ -1013,7 +1048,9 @@ Dictionary sense under a lemma: guideword and contextual English sense from ORAC
 
 Lemma → Sense, written once per distinct sense of a lemma.
 
-- **Edge:** node:Lemma → node:Sense · cardinality 1:N · qualification —
+- **Provenance:** Since oracc-cdl-2 the edge carries an attribution note: its source_record_id still names the first attesting text, because the schema has no project-level record (deferred schema change, Q-005 F4).
+- **Notes:** Corpus evidence is snapshot:edaab55c (oracc-cdl-1, written by d6049e2); its counts are valid, but it is superseded by the accepted oracc-cdl-2 rebuild snapshot:5e51403b for sense provenance (same counts per Q-020; accepted by v0.3).
+- **Edge:** node:Lemma → node:Sense · cardinality 1:N · qualification attribution
 - **Files:** `cuneiform/model.py`, `cuneiform/oracc.py`
 - **Evidence:** `tests/test_corpus_pilot.py::test_words_lemmas_senses_and_claims_without_invented_translation`
 - **Corpus evidence:** `snapshot:edaab55c1a39cc65ad7c76e6d12547a7` HAS_SENSE=1317 (read by Q-007/Q-018 atlas worker (read-only storage.verify + manifest counts / exported edge Parquet), 2026-11-03)
@@ -1023,8 +1060,9 @@ Lemma → Sense, written once per distinct sense of a lemma.
 
 WordToken → Sense: the contextual sense ORACC asserts for this lemmatization instance (f.sense). An English lexical gloss, not a translation and not an alignment.
 
-- **Provenance:** Explicit per-instance source assertion; basis states that it is a gloss, not a translation.
-- **Edge:** node:WordToken → node:Sense · cardinality N:1 (each lemmatized word points at exactly its own sense) · qualification basis
+- **Provenance:** Explicit per-instance source assertion. basis states that it is a gloss, not a translation. Since oracc-cdl-2 (94af111) each edge also carries the occurrence's own ORACC sig, inst and payload_pointer, so the instance signature lives on the occurrence, not on the shared Sense row (Q-005 F4).
+- **Notes:** Corpus evidence is snapshot:edaab55c (oracc-cdl-1, written by d6049e2); its counts are valid, but it is superseded by the accepted oracc-cdl-2 rebuild snapshot:5e51403b for sense provenance (same counts per Q-020; accepted by v0.3). Q-020 checked all 4,544 IN_SENSE edges of 5e51403b against the raw nodes (0 mismatches).
+- **Edge:** node:WordToken → node:Sense · cardinality N:1 (each lemmatized word points at exactly its own sense) · qualification basis, inst, payload_pointer, sig
 - **Files:** `cuneiform/model.py`, `cuneiform/oracc.py`
 - **Evidence:** `tests/test_corpus_pilot.py::test_words_lemmas_senses_and_claims_without_invented_translation`, `tests/test_corpus_pilot.py::test_snapshots_verify_parity_and_traces`
 - **Corpus evidence:** `snapshot:edaab55c1a39cc65ad7c76e6d12547a7` IN_SENSE=4544 (read by Q-007/Q-018 atlas worker (read-only storage.verify + manifest counts / exported edge Parquet), 2026-11-03)
@@ -1197,7 +1235,7 @@ Separates source-asserted time of events/artifacts/custody/publication from syst
 
 | ID | Kind | Modeled | Implemented | Populated | Verified | Backing | Queue |
 |---|---|---|---|---|---|---|---|
-| `temporal:system-time` | value | documented | code | none | disk (UNVERIFIED) | `cuneiform/storage.py::materialize` | Q-014 |
+| `temporal:system-time` | value | documented | code | none | disk | `cuneiform/storage.py::materialize` | Q-014 |
 | `temporal:source-validity` | value | proposed | none | none | none | — | Q-014, Q-015 |
 | `value:TemporalExtent` | value | proposed | none | none | none | — | Q-014, Q-015 |
 | `value:temporal-role` | value | proposed | none | none | none | — | Q-014 |
@@ -1221,7 +1259,7 @@ When this system acquired/imported bytes. Implemented only as manifest retrieved
 - **Notes:** Manifest value, not rows. Disk level rests on the corpus worker's UNVERIFIED d6049e2 run (historically the parent's 2ab620b run).
 - **Files:** `cuneiform/storage.py`
 - **Evidence:** `tests/test_disk_delivery.py::test_snapshot_idempotence_relocation_parquet_and_tamper`
-- **Verified by:** `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`); `parent-full-disk-2ab620b` (Parent orchestrator, 2026-11-03, code `2ab620b`)
+- **Verified by:** `review-v03-disk-63f4221` (Final publication review c5df3251 (independent of the Q-022 fix worker), 2026-11-03, code `63f4221`); `q021-disk-63f4221` (Atlas repair worker (Q-021), 2026-11-03, code `63f4221`); `backend-q022-disk-63f4221` (Q-022 backend fix worker (Q-020 R1-R5 round), 2026-11-03, code `63f4221`); `q020-disk-94af111` (Q-020 review sub-agent (independent of fix task 44ddaeb1), 2026-11-03, code `94af111`); `backend-fix-disk-94af111` (Backend fix worker, task 44ddaeb1 (Q-001 fix round), 2026-11-03, code `94af111`); `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`); `parent-full-disk-2ab620b` (Parent orchestrator, 2026-11-03, code `2ab620b`)
 - **Sources:** cuneiform/storage.py
 
 #### `temporal:source-validity` — Source temporal validity
@@ -1285,18 +1323,18 @@ Namespaced period vocabulary (e.g. a CDLI 'period' label, an eBL script period) 
 
 #### `facet:cdli-temporal-fields` — Observed CDLI temporal fields (raw only)
 
-Retained CSV headers: period, period_remarks, date_of_origin, dates_referenced, alternative_years, accounting_period, publication_date, publication_history, date_entered, date_updated, acquisition_history, excavation_no.
+Persisted CDLI artifact JSON (cdli-selection, snapshot:fc7c3504, 51 records): period is an object {id, name, period, sequence, time_range} or null; dates is a list; dates_referenced is a string or null. The earlier retained CSV sample has the headers period, period_remarks, date_of_origin, dates_referenced, alternative_years, accounting_period, publication_date, publication_history, date_entered, date_updated, acquisition_history and excavation_no.
 
-- **Raw retained in:** artifact.metadata / source_record.raw_json for CDLI rows
-- **Notes:** Value shapes seen in three retained rows: period 'Uruk III (ca. 3200-3000 BC)' (label + source-attributed approximate BC range); date_of_origin / dates_referenced '00.00.00.00' (sentinel = unknown) or empty; publication_date '1993' or '2015ff.' (open end); date_entered '12/4/2001' (US-style system date); date_updated ISO '2020-03-14'. These are catalog assertions, not verified dates.
+- **Raw retained in:** source_record.raw_json (JSON object per artifact) and artifact.metadata
+- **Notes:** Observed in fc7c3504 (structure read from copies by the atlas worker, nothing parsed): period present in 41 of 51 and null in 10, e.g. name 'Neo-Assyrian', period 'Neo-Assyrian (ca. 911-612 BC)', time_range 'ca. 911-612 BC' (label plus a source-attributed approximate range); dates is [] in all 51; dates_referenced is null in 50 and a regnal-style string 'Artaxerxes.19.11.23' in 1, which is not interpreted. accession_no values such as '1883-01-18, 0722' are museum registration numbers, not dates. CSV sample shapes (three retained rows): date_of_origin '00.00.00.00' (sentinel = unknown) or empty, publication_date '1993' or '2015ff.' (open end), date_entered '12/4/2001', date_updated '2020-03-14'. All are catalog assertions, not verified dates.
 - **Sources:** docs/INGESTION-DESIGN.md
 
 #### `facet:ebl-temporal-fields` — Observed eBL temporal fields (raw only)
 
-Retained K.1 record has script.period, script.periodModifier, archaeology.date, archaeology.findspot.date and references[].document.issued.date-parts (publication years).
+Persisted eBL fragment JSON (ebl-cohort, snapshot:c316e7cb, 51 records): script is {period, periodModifier, sortKey, uncertain}; date and datesInText are present as fields; record is a list of {date, type, user} edit events. The retained K.1 sample also has archaeology.date, archaeology.findspot.date and references[].document.issued.date-parts.
 
 - **Raw retained in:** artifact.metadata / source_record.raw_json for eBL records
-- **Notes:** Observed: script.period 'Neo-Babylonian' with periodModifier 'None'; archaeology.date null; findspot.date null; reference issued years numeric. Script period is a paleographic attribution, not an absolute date.
+- **Notes:** Observed in c316e7cb (structure only): script.period 'Neo-Assyrian' 24, 'Neo-Babylonian' 20, 'Late Babylonian' 3 and two other values; periodModifier 'None' in all 51; uncertain is a boolean. date is null and datesInText is [] in all 51; no archaeology object. record holds 374 eBL editorial events (ISO timestamps of edits): system/editorial time of the source, never an ancient date. Script period is a paleographic attribution, not an absolute date. Q-015 should be scoped against these JSON shapes.
 - **Sources:** docs/INGESTION-DESIGN.md
 
 #### `decision:TD-1` — TD-1 Year numbering and BCE convention
@@ -1429,8 +1467,8 @@ Canonical edge table, node/edge views, portable Parquet export, CLI, FalkorDB pr
 | `contract:portable-graph-export` | contract | documented | code | none | none | `cuneiform/persisted.py::export_graph`, `cuneiform/persisted.py::EXPORTER` | Q-009, Q-005 |
 | `service:falkordb-projection` | service | specified | none | none | none | — | Q-009, Q-008 |
 | `service:mcp-read-slice` | service | specified | none | none | none | — | Q-010 |
-| `interface:cli` | interface | documented | code | none | unit | `cuneiform/cli.py::main` | Q-005 |
-| `interface:ui` | interface | documented | code | none | none | external `../cuneiform-ui`@`567ea14` | Q-002, Q-006, Q-008 |
+| `interface:cli` | interface | documented | code | none | unit | `cuneiform/cli.py::main` | Q-005, Q-020, Q-022 |
+| `interface:ui` | interface | documented | code | none | none | external `../cuneiform-ui`@`30f1f45` | Q-002, Q-006, Q-008 |
 
 #### `table:edge` — edge (canonical edge store)
 
@@ -1478,9 +1516,9 @@ COPY of nodes and portable_edge to Parquet with an import receipt (snapshot ID, 
 
 #### `service:falkordb-projection` — FalkorDB graph projection (isolated)
 
-Disposable graph rebuilt from contract:portable-graph-export for traversals. Not implemented in this repository. A separate isolated FalkorDB instance runs for the sibling UI (cuneiform-ui 567ea14, Browser on :23001); whether it replaces this planned projection or stays a separate consumer is a Q-008/Q-009 decision.
+Disposable graph rebuilt from contract:portable-graph-export for traversals. Not implemented in this repository. The sibling UI runs its own isolated, authenticated FalkorDB (cuneiform-ui ca4b514) behind bounded query templates, with the Browser on :23001 and freeform Cypher disabled. Whether it replaces this planned projection or stays a separate consumer is a Q-008/Q-009 decision.
 
-- **Notes:** The sibling instance is delivered but not independently verified (UI review bc133950, fixes by b13b7efc).
+- **Notes:** The sibling instance is pilot-usable per the UI re-review (reviews/ui-review-v0.2.md in the sibling); nothing here is verified.
 - **Sources:** SPEC-v0.2.md §9, docs/REPRESENTATION-MAP.md
 
 #### `service:mcp-read-slice` — MCP read slice
@@ -1491,18 +1529,19 @@ corpus_search, record_get, sequence_get, pattern_search, evidence_trace + append
 
 #### `interface:cli` — CLI (python -m cuneiform)
 
-python -m cuneiform: demo, explore, fetch, acquire, receipts, corpus-inspect, corpus-select, corpus-audit, corpus-import, snapshots, scope, manifest, lookup, query, parity, trace, trace-word, export-graph, catalog-link, cdli-import, oracc-inspect, oracc-import.
+python -m cuneiform: demo, explore, fetch, acquire, receipts, corpus-inspect, corpus-select, corpus-audit, corpus-import, snapshots, publication-status, publication-recover, publication-adopt, publication-repair-ledger, publication-clean-stage, scope, manifest, lookup, query, parity, trace, trace-word, export-graph, catalog-link, cdli-import, oracc-inspect, oracc-import.
 
+- **Notes:** Read verbs resolve snapshots through storage.store_path, which at 63f4221 returns a ledger-required StoreEntry and refuses symlinked or misplaced entries (exit 2, writer-tested). The publication-* verbs are the only recovery path; nothing is automatic (docs/PUBLICATION-PROTOCOL.md). Since 63f4221 they take --store {snapshots,cohorts}; publication-status adds store, symlinked_entries and a per-row id; corpus-audit JSON adds publication. Verb list read from cuneiform/cli.py at 63f4221 by the atlas worker (unchanged from 94af111).
 - **Files:** `cuneiform/cli.py`
 - **Evidence:** `tests/test_trace_and_admission.py::test_dry_run_reports_block_without_writes`
 - **Sources:** README.md, docs/REPRESENTATION-MAP.md
 
 #### `interface:ui` — Research UI (sibling cuneiform-ui)
 
-Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui, with its own isolated FalkorDB projection. Delivered; not independently verified.
+Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui, with an isolated, authenticated FalkorDB behind bounded query templates. Pilot-usable against the pinned backend d6049e2 (re-review 05cfcd7b at ca4b514); polish commit 30f1f45 delivered, not yet re-reviewed. Not accepted end-to-end.
 
-- **Notes:** This checker resolves files under this repository only, so the UI is cited by commit. It must consume the read-only lookup/trace surface and these model IDs; the integration contract is Q-008.
-- **External:** `../cuneiform-ui` at `567ea14` · HTTP 200 on 127.0.0.1:8740 (UI) and :23001 (FalkorDB Browser) reported by the parent and the Q-004 reviewer; not re-probed by the atlas worker. The sibling checkout has uncommitted fixes from UI fix worker b13b7efc. · review: UI review bc133950 reported findings (F-4 is cited in CHECKPOINT.md); fixes in progress; nothing verified.
+- **Notes:** This checker resolves files under this repository only, so the UI is cited by commit. It consumes the read-only lookup/trace surface and these model IDs (Q-008). Still pinned to d6049e2 semantics. For the re-pin (v0.3 §11): read store entries through resolve_snapshot/store_path or verified(path, ledger='require'); handle PublicationError states symlinked-entry, misplaced, not-found, reserved, published-missing and abandoned; treat a reader's reserved as not yet available (N1); use ledger='store' for cohort reads (N2); label edaab55c as superseded by 5e51403b for sense provenance.
+- **External:** `../cuneiform-ui` at `30f1f45` · 30f1f45 "Fix UI review v0.2 N-1, N-3..N-7; prepare ledger format 2 (pin unchanged)" exists in the sibling (git, read by the atlas worker). Writer-reported, UNVERIFIED: 37/37 unit tests and 24 read-only isolation checks, stable browser refresh. Backend pin still d6049e2. Earlier, at ca4b514, re-review 05cfcd7b observed the workbench on 127.0.0.1:8740, the FalkorDB Browser (:23001) and freeform Cypher disabled, and 24/24 UI tests OK. · review: Re-review 05cfcd7b (sibling reviews/ui-review-v0.2.md) verified all 19 v0.1 findings fixed at ca4b514 for pilot scope and raised N-1 to N-7. Polish task 126fb290 (30f1f45) dispositioned N-1 and N-3 to N-7, and prepared N-2. The final publication review (reviews/corpus-pilot-review-v0.3.md) allows the UI to re-pin from d6049e2 to 63f4221; the parent is dispatching that re-pin. Integration is pending until its result. The combined re-pin and integration review must include a fresh residual review of 30f1f45 and check the torn-ledger handling against the backend: readers tolerate only an unparseable unterminated final record, still refuse any ID whose reservation is not committed, and refuse an unparseable middle record.
 - **Sources:** QUEUE.md, reviews/atlas-review-v0.1.md
 
 ### Edge registry (all edge entries)
@@ -1527,8 +1566,8 @@ Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui, with
 | `edge:HAS_WORD` | node:SequenceVersion → node:WordToken | 1:N per source lemmatization sequence | line_label, order | code | corpus |
 | `edge:HAS_SIGN` | node:WordToken → node:SignOccurrence | 1:N ordered | order, segmentation | schema | none |
 | `edge:LEMMATIZED_AS` | node:WordToken → node:Lemma | N:1 per source analysis | epos, guideword, inst, norm, sig | code | corpus |
-| `edge:HAS_SENSE` | node:Lemma → node:Sense | 1:N | — | code | corpus |
-| `edge:IN_SENSE` | node:WordToken → node:Sense | N:1 (each lemmatized word points at exactly its own sense) | basis | code | corpus |
+| `edge:HAS_SENSE` | node:Lemma → node:Sense | 1:N | attribution | code | corpus |
+| `edge:IN_SENSE` | node:WordToken → node:Sense | N:1 (each lemmatized word points at exactly its own sense) | basis, inst, payload_pointer, sig | code | corpus |
 | `edge:PLACED_IN_SEQUENCE` | node:TranslationSegment → node:SequenceVersion | N:0..1 | alignment | code | sample |
 | `edge:TRANSLATES` | node:TranslationSegment → node:Passage | N:M | granularity | schema | none |
 | `edge:CLAIM_SUBJECT` | node:Claim → node:Artifact | N:1 | — | code | sample |
