@@ -10,7 +10,11 @@ from .storage import verify
 def connect(path: Path | duckdb.DuckDBPyConnection):
     if isinstance(path, duckdb.DuckDBPyConnection):
         return path.cursor()
-    manifest=verify(path)
+    return open_verified(path, verify(path))
+
+
+def open_verified(path: Path, manifest: dict):
+    """Open graph.duckdb read-only for a manifest the caller has just verified in this same call (no second hash pass)."""
     db=duckdb.connect(str(path/'graph.duckdb'),read_only=True)
     if manifest['schema_version']!='1':
         registry=db.execute('SELECT revision,config FROM projection_registry').fetchall()
@@ -101,7 +105,12 @@ def trace_rows(db, raw: bytes, manifest: dict, occurrence_id: str, *, verified_m
 
 def trace(path: Path, occurrence_id: str, parent_root: Path | None=None) -> dict:
     """Verified snapshot trace. Cohort snapshots additionally verify the token inside the parent raw object."""
-    manifest=verify(path); db=connect(path)
+    import time
+    started=time.monotonic()
+    from .storage import verified
+    checked=verified(path); manifest=checked['manifest']
+    verify_ms=round((time.monotonic()-started)*1000,1)
+    db=open_verified(path,manifest)
     try:
         raw=(path/'raw').read_bytes()
         member=None
@@ -112,7 +121,12 @@ def trace(path: Path, occurrence_id: str, parent_root: Path | None=None) -> dict
             member=next((m for m in cohort['records'] if m['payload_pointer']==locator[0]),None)
             if member is None: raise ValueError('occurrence record not bound in cohort manifest')
         result=trace_rows(db,raw,manifest,occurrence_id,verified_manifest=True,record_slice=(member['payload_start'],member['payload_end']) if member else None)
+        t=time.monotonic()
         if member: result['parent_trace']=parent_trace(manifest,member,raw,result,parent_root)
+        parent_ms=round((time.monotonic()-t)*1000,1)
+        result['publication']=checked['publication']
+        result['timing']={'verify_ms':verify_ms,'parent_trace_ms':parent_ms,'end_to_end_ms':round((time.monotonic()-started)*1000,1),
+                          'note':'end_to_end_ms covers snapshot verification (every payload hash), the trace, and parent re-hash/re-read when requested'}
         return result
     finally: db.close()
 

@@ -2,7 +2,7 @@ import argparse
 import json
 import os
 from pathlib import Path
-from .storage import Config, fetch, import_source, inspect, resolve_snapshot, verify
+from .storage import Config, fetch, import_source, inspect, resolve_snapshot, store_path, verify
 from .query import motif, trace
 
 REPO=Path(__file__).resolve().parents[1]
@@ -30,7 +30,12 @@ def main() -> None:
     p=sub.add_parser('corpus-select',help='deterministic cohort extraction with immutable manifest');p.add_argument('receipt');p.add_argument('--size',type=int);p.add_argument('--cdli-from-oracc',help='ORACC export receipt: keep only exact cdliNumber matches with its corpus');p.add_argument('--project')
     p=sub.add_parser('corpus-audit',help='per-record feasibility audit for a cohort');p.add_argument('cohort');p.add_argument('--markdown',action='store_true')
     p=sub.add_parser('corpus-import',help='chunked import of a cohort into an immutable snapshot');p.add_argument('cohort');p.add_argument('--batch',type=int,default=200)
-    sub.add_parser('snapshots',help='list and verify persisted snapshots')
+    sub.add_parser('snapshots',help='list and verify persisted snapshots (ledger-checked)')
+    p=sub.add_parser('publication-status',help='ledger state, open reservations and leftover stages (read-only)');p.add_argument('snapshot',nargs='?')
+    p=sub.add_parser('publication-recover',help='resolve an interrupted reservation; never publishes bytes other than the reserved ones');p.add_argument('snapshot');p.add_argument('--action',choices=['inspect','commit','complete','discard','abandon'],default='inspect');p.add_argument('--reason',default='')
+    p=sub.add_parser('publication-adopt',help='explicitly ledger an existing snapshot directory that has no ledger record');p.add_argument('snapshot');p.add_argument('--reason',required=True)
+    p=sub.add_parser('publication-repair-ledger',help='append-only acknowledgement of a torn final ledger record');p.add_argument('--reason',required=True)
+    p=sub.add_parser('publication-clean-stage',help='remove one named leftover .pending-* stage that no reservation names');p.add_argument('stage');p.add_argument('--min-age-s',type=int,default=600)
     p=sub.add_parser('scope',help='population a snapshot describes (cohort size, eligible/parent denominators, parent receipt)');p.add_argument('snapshot')
     p=sub.add_parser('manifest');p.add_argument('snapshot')
     p=sub.add_parser('lookup',help='bounded organizations over a persisted snapshot');p.add_argument('snapshot');p.add_argument('organization',choices=ORGANIZATIONS);p.add_argument('value',nargs='?',default='');scope_args(p)
@@ -97,43 +102,86 @@ def dispatch(args, cfg):
         out=[]
         for d in sorted((cfg.root/'snapshots').glob('snapshot:*')) if (cfg.root/'snapshots').exists() else []:
             try:
-                m=verify(d,d.name)
+                from .storage import verified
                 from .persisted import scope
+                v=verified(d,d.name,ledger='require'); m=v['manifest']
                 sc=scope(d,m)
-                out.append({'scope_label':sc['label'],'scope_note':sc['scope_note'],'manifest_sha256':m['manifest_sha256'],'snapshot':d.name,'source':m['source'],'namespace':m['namespace'],'record_id':m['record_id'],'imported':m['retrieved_or_imported_at'],'occurrences':m['counts'].get('occurrence'),'bytes':m.get('snapshot_payload_bytes'),'verified':True})
-            except (ValueError,OSError,KeyError) as exc: out.append({'snapshot':d.name,'verified':False,'error':str(exc)})
+                out.append({'scope_label':sc['label'],'scope_note':sc['scope_note'],'manifest_sha256':m['manifest_sha256'],'snapshot':d.name,'source':m['source'],'namespace':m['namespace'],'record_id':m['record_id'],'imported':m['retrieved_or_imported_at'],'occurrences':m['counts'].get('occurrence'),'bytes':m.get('snapshot_payload_bytes'),'verified':True,'publication':v['publication'],'input_identity':sc['input_identity']})
+            except (ValueError,OSError,KeyError) as exc: out.append({'snapshot':d.name,'verified':False,'error':str(exc),'state':getattr(exc,'state',None)})
         return out
-    if c=='manifest': return verify(resolve_snapshot(cfg,args.snapshot))
+    if c.startswith('publication-'): return publication_command(args,cfg)
+    if c=='manifest': return verify(store_path(cfg,args.snapshot),args.snapshot)
     if c=='scope':
         from .persisted import scope
-        return scope(resolve_snapshot(cfg,args.snapshot))
+        return scope(store_path(cfg,args.snapshot))
     if c=='lookup':
         from .persisted import lookup_snapshot
-        return lookup_snapshot(resolve_snapshot(cfg,args.snapshot),args.organization,args.value,namespace=args.namespace,snapshot=args.snapshot,field=args.field,policy=args.policy,limit=args.limit,offset=args.offset)
-    if c=='query': return motif(resolve_snapshot(cfg,args.snapshot),args.pattern,args.field,args.strict,args.max_skip)
+        return lookup_snapshot(store_path(cfg,args.snapshot),args.organization,args.value,namespace=args.namespace,snapshot=args.snapshot,field=args.field,policy=args.policy,limit=args.limit,offset=args.offset)
+    if c=='query': return motif(store_path(cfg,args.snapshot),args.pattern,args.field,args.strict,args.max_skip)
     if c=='parity':
         from .persisted import parity
-        return parity(resolve_snapshot(cfg,args.snapshot),json.loads(args.pattern),args.field)
-    if c=='trace': return trace(resolve_snapshot(cfg,args.snapshot),args.occurrence,parent_root=cfg.root)
+        return parity(store_path(cfg,args.snapshot),json.loads(args.pattern),args.field)
+    if c=='trace': return trace(store_path(cfg,args.snapshot),args.occurrence,parent_root=cfg.root)
     if c=='trace-word':
         from .oracc import trace_word
-        return trace_word(resolve_snapshot(cfg,args.snapshot),args.word,parent_root=cfg.root)
+        return trace_word(store_path(cfg,args.snapshot),args.word,parent_root=cfg.root)
     if c=='export-graph':
         from .persisted import export_graph
-        return export_graph(resolve_snapshot(cfg,args.snapshot),cfg)
+        return export_graph(store_path(cfg,args.snapshot),cfg)
     if c=='catalog-link':
         from .persisted import catalog_link
-        return catalog_link([resolve_snapshot(cfg,s) for s in args.snapshot],args.key)
+        return catalog_link([store_path(cfg,s) for s in args.snapshot],args.key)
     if c=='cdli-import':
         from .cdli_api import fetch as cdli_fetch, import_artifacts, pnumbers_from_snapshot
-        got=cdli_fetch(cfg,pnumbers_from_snapshot(resolve_snapshot(cfg,args.from_snapshot)),args.allowlist,max_records=args.max_records)
+        got=cdli_fetch(cfg,pnumbers_from_snapshot(store_path(cfg,args.from_snapshot)),args.allowlist,max_records=args.max_records)
         return import_artifacts(cfg,got)
     if c=='oracc-inspect':
         from .oracc import inspect_export
         return inspect_export(cfg.root,args.receipt)
     if c=='oracc-import':
         from .oracc import import_project
-        return import_project(cfg,args.receipt,args.project,texts=args.text,match_snapshot=resolve_snapshot(cfg,args.texts_from_snapshot) if args.texts_from_snapshot else None,max_texts=args.max_texts)
+        return import_project(cfg,args.receipt,args.project,texts=args.text,match_snapshot=store_path(cfg,args.texts_from_snapshot) if args.texts_from_snapshot else None,max_texts=args.max_texts)
+    raise ValueError('unknown command')
+
+
+def publication_command(args, cfg):
+    import time
+    from .publication import adopt, discard_stage, inspect_reservation, recover
+    from .storage import store_ledger, valid_sid, verify_content
+    ledger=store_ledger(cfg); folder=cfg.root/'snapshots'; c=args.command
+    if c=='publication-status':
+        entries,tail=ledger.scan()
+        ids=[valid_sid(args.snapshot)] if args.snapshot else ledger.ids()
+        states=[]
+        for sid in ids:
+            st=ledger.status(sid,entries)
+            states.append({'snapshot':sid,'state':st.state,'kind':st.kind,'manifest_sha256':st.manifest_sha256,'directory_present':(folder/sid).exists(),'reason':st.reason,
+                           **({'recovery':inspect_reservation(ledger,sid,folder,verify_content)} if st.state=='reserved' else {})})
+        known=set(ledger.ids())
+        unledgered=sorted(d.name for d in folder.glob('snapshot:*')) if folder.exists() else []
+        stages=[{'stage':d.name,'age_s':round(time.time()-d.stat().st_mtime),'named_by_reservation':any(ledger.status(i,entries).stage==d.name for i in known)} for d in sorted(folder.glob('.pending-*'))] if folder.exists() else []
+        return {'ledger':str(ledger.path),'ledger_exists':ledger.exists(),'torn_tail':tail,'snapshots':states,
+                'unledgered_directories':[n for n in unledgered if n not in known],'stages':stages,
+                'limits':'application-level protocol for cooperating writers; same-owner OS access and root can still alter files and the ledger'}
+    if c=='publication-recover':
+        sid=valid_sid(args.snapshot)
+        if args.action=='inspect': return inspect_reservation(ledger,sid,folder,verify_content)
+        if not args.reason: raise ValueError('--reason is required for a recovery action')
+        return recover(ledger,sid,folder,args.action,verify_content,args.reason)
+    if c=='publication-adopt': return adopt(ledger,valid_sid(args.snapshot),folder,verify_content,args.reason)
+    if c=='publication-repair-ledger': return ledger.repair_tail(args.reason)
+    if c=='publication-clean-stage':
+        name=args.stage
+        if not name.startswith('.pending-') or '/' in name: raise ValueError('only a .pending-* stage name inside the snapshot store is accepted')
+        stage=folder/name
+        if not stage.is_dir(): raise ValueError(f'{stage} does not exist')
+        with ledger.locked():
+            entries=ledger.writer_scan()
+            if any(ledger.status(i,entries).state=='reserved' and ledger.status(i,entries).stage==name for i in ledger.ids()):
+                raise ValueError(f'{name} is named by an open reservation; use publication-recover')
+            if time.time()-stage.stat().st_mtime<args.min_age_s: raise ValueError(f'{name} is younger than {args.min_age_s}s and may belong to a live build')
+            discard_stage(stage)
+        return {'removed':str(stage)}
     raise ValueError('unknown command')
 
 if __name__=='__main__': main()

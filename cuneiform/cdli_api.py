@@ -43,7 +43,7 @@ def fetch(config, pnumbers: list[str], allowlist: Path, delay: float = 1.0, max_
 def import_artifacts(config, receipt_list: list[dict]) -> dict:
     from .acquire import verify_raw
     from .projections import ProjectionConfig, REVISION
-    from .storage import assert_unpublished, materialize, snapshot_identity, verify
+    from .storage import existing_snapshot, materialize, snapshot_identity
     members, parts, offset = [], [b'[\n'], 2
     for i, r in enumerate(sorted(receipt_list, key=lambda r: r['url'])):
         data = verify_raw(config.root, r['sha256'], r['bytes']).read_bytes()
@@ -58,9 +58,7 @@ def import_artifacts(config, receipt_list: list[dict]) -> dict:
     projections = ProjectionConfig(); spec = {'revision': REVISION, 'config': asdict(projections)}
     source, ns = 'cdli-selection', 'cdli'
     sid = snapshot_identity(ns, source, digest(payload), SCHEMA_VERSION, PARSER_VERSION, selection['selection_id'], 'https://cdli.earth/artifacts/', spec)
-    dest = config.root/'snapshots'/sid
-    if dest.exists(): return {'snapshot': sid, 'reused': True, 'manifest': verify(dest, sid)}
-    assert_unpublished(config, sid)
+    if (existing := existing_snapshot(config, sid)): return existing
     stats = {}
 
     def load(db, stage):
@@ -70,7 +68,7 @@ def import_artifacts(config, receipt_list: list[dict]) -> dict:
     meta = {'namespace': ns, 'source': source, 'source_url': 'https://cdli.earth/artifacts/', 'record_id': selection['selection_id'], 'rights': RIGHTS, 'adapter': ADAPTER,
             'selection': {'selection_id': selection['selection_id'], 'manifest_sha256': selection['manifest_sha256'], 'records': len(members)}, 'ingestion': stats}
     r = materialize(config, sid, payload, load, projections, spec, meta, {'selection.json': json.dumps(selection, ensure_ascii=False, indent=1).encode() + b'\n'})
-    return {'snapshot': r['snapshot'], 'reused': False, 'counts': r['manifest']['counts'], 'ingestion': stats}
+    return {'snapshot': r['snapshot'], 'reused': r['reused'], 'counts': r['manifest']['counts'], 'ingestion': stats}
 
 
 def map_records(b: Builder, payload: bytes, members: list[dict]) -> dict:

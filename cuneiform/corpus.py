@@ -249,12 +249,22 @@ def build_cohort(path: Path, parent: dict, size: int | None, out_root: Path, rul
     """Write an immutable cohort directory (manifest.json + payload.json). Existing cohorts are verified, never rewritten.
 
     size=None selects every eligible record (used with an explicit key filter)."""
+    from .publication import Ledger, PublicationError, discard_stage, file_digest, publish_dir, refusal, seal
+    import uuid
     cid = cohort_identity(parent, rule, size)
     target = out_root/cid.replace(':', '-')
-    if target.exists(): return verify_cohort(target, path)
+    ledger = Ledger(out_root, key='cohort_id', label='cohort', dirname=lambda c: c.replace(':', '-'))
+    st = ledger.status(cid)
+    if target.exists():
+        if st.state == 'published':
+            if verify_cohort(target, path)['manifest_sha256'] != st.manifest_sha256: raise PublicationError(f'{cid}: cohort manifest differs from its ledger record; refusing', 'ledger-mismatch')
+        elif st.state != 'unpublished': raise refusal(st, target, 'cohort')
+        # unpublished + present: a cohort written before the cohort ledger existed; verified, not ledger-bound.
+        return verify_cohort(target, path)
+    if st.state not in ('unpublished', 'aborted'): raise refusal(st, target, 'cohort')
     picked = select(path, parent, size, rule)
     if size is not None and len(picked['chosen']) < size: raise ValueError(f'source supports only {len(picked["chosen"])} records under rule; requested {size}')
-    stage = out_root/('.pending-' + cid.replace(':', '-'))
+    stage = out_root/('.pending-' + uuid.uuid4().hex)
     stage.mkdir(parents=True)
     try:
         members = []; offset = 0
@@ -281,9 +291,20 @@ def build_cohort(path: Path, parent: dict, size: int | None, out_root: Path, rul
                     'rights': parent.get('rights')}
         manifest['manifest_sha256'] = digest(canonical(manifest).encode())
         (stage/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + '\n')
-        stage.rename(target)
-    except BaseException:
-        import shutil; shutil.rmtree(stage, ignore_errors=True); raise
+        seal(stage)
+        def matches(d):
+            try: return verify_cohort(d)['manifest_sha256'] == manifest['manifest_sha256']
+            except (ValueError, OSError, KeyError): return False
+        if publish_dir(ledger, stage, target, cid, manifest['manifest_sha256'], file_digest(stage/'manifest.json'), matches) == 'raced':
+            discard_stage(stage)
+    except BaseException as exc:
+        try:
+            st = ledger.status(cid)
+            if not (st.state == 'reserved' and st.stage == stage.name): discard_stage(stage)
+            else: exc.add_note(f'stage {stage} is named by the open cohort reservation; kept for recovery')
+        except BaseException as cleanup_exc:
+            exc.add_note(f'cohort stage cleanup failed ({cleanup_exc!r}); {stage} remains')
+        raise
     return verify_cohort(target, path)
 
 

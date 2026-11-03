@@ -6,6 +6,10 @@ Verified against the acquired ccpo export and doc/opendata/json (2019 revision):
   corpusjson/P.json  cdl tree; node 'l' = one lemmatized word instance -> WordToken
        f.cf / f.gw / f.pos / f.lang -> Lemma (scoped to project + snapshot); f.sense -> Sense (English contextual sense)
        Word -> Sense is an explicit source assertion per instance (IN_SENSE). gw/sense are lexical glosses, NOT translation.
+  Provenance (oracc-cdl-2): Lemma and Sense rows are shared by every attestation, so they carry no instance data.
+       Sense.source_locator is a sense-key locator (lemma key + sense) plus a labelled first-attestation pointer.
+       Each instance's own sig/inst/norm/epos and payload pointer live on its LEMMATIZED_AS and IN_SENSE edges.
+       oracc-cdl-1 (snapshot:edaab55c…) stored the first attesting instance's sig on the Sense row; it is not rewritten.
   Translation text: absent from the JSON export (metadata.formats lists tr-en only). No TranslationSegment is created.
   Graphemes (f.gdl) are retained in raw JSON; sign-level occurrences are not mapped in this adapter revision.
 
@@ -20,7 +24,7 @@ import zipfile
 from .adapters import Builder
 from .model import PARSER_VERSION, SCHEMA_VERSION, canonical, digest, identity
 
-ADAPTER = 'oracc-cdl-1'
+ADAPTER = 'oracc-cdl-2'
 MAX_MEMBER = 16 * 1024 * 1024
 MAX_SELECTION = 256 * 1024 * 1024
 
@@ -89,14 +93,12 @@ def select_texts(z, project: str, *, texts: list[str], match_keys: set[str] | No
 
 def import_project(config, receipt_id: str, project: str, *, texts: list[str] = (), match_snapshot: Path | None = None, max_texts: int = 100) -> dict:
     from .projections import ProjectionConfig, REVISION
-    from .storage import assert_unpublished, materialize, snapshot_identity, verify
+    from .storage import existing_snapshot, materialize, snapshot_identity
     z, receipt = _zip(config.root, receipt_id)
     match = None
     if match_snapshot is not None:
-        import duckdb
         from .query import connect
-        verify(match_snapshot)
-        db = connect(match_snapshot)
+        db = connect(match_snapshot)   # verifies (ledger-checked inside a store)
         try: match = {k for (k,) in db.execute("SELECT DISTINCT object_key FROM claim WHERE predicate='catalog_alias' AND object_key LIKE 'cdli:%'").fetchall()}
         finally: db.close()
     with z:
@@ -124,9 +126,7 @@ def import_project(config, receipt_id: str, project: str, *, texts: list[str] = 
     projection_spec = {'revision': REVISION, 'config': asdict(projections)}
     source = 'oracc-selection'; record_id = selection['selection_id']; url = receipt['url']
     sid = snapshot_identity(namespace, source, digest(payload), SCHEMA_VERSION, PARSER_VERSION, record_id, url, projection_spec)
-    dest = config.root/'snapshots'/sid
-    if dest.exists(): return {'snapshot': sid, 'reused': True, 'manifest': verify(dest, sid)}
-    assert_unpublished(config, sid)
+    if (existing := existing_snapshot(config, sid)): return existing
     config.guard(len(payload) * 50 + 64 * 1024 * 1024)
     stats = {}
 
@@ -213,9 +213,14 @@ def map_selection(b: Builder, payload: bytes, members: list[dict], project: str)
                 sense_id = identity('sense', lid, f['sense'])
                 if sense_id not in senses:
                     senses.add(sense_id); stats['senses'] += 1
-                    b.add('sense', sense_id, lid, f.get('gw'), f['sense'], node.get('sig') or '')
-                    b.edge('HAS_SENSE', lid, sense_id, rid)
-                b.edge('IN_SENSE', wid_, sense_id, rid, basis='ORACC contextual sense on this lemmatization instance; English lexical gloss, not a translation')
+                        # Shared node: a sense-level locator only. The first attestation is a labelled pointer, never its sig.
+                    b.add('sense', sense_id, lid, f.get('gw'), f['sense'], canonical({
+                        'locator_kind': 'oracc-sense-key', 'project': project, 'lemma_key': {'lang': f.get('lang'), 'cf': cf, 'gw': f.get('gw'), 'pos': f.get('pos')},
+                        'sense': f['sense'], 'first_attestation_in_selection': {'word_id': wid_, 'payload_pointer': m['payload_pointer'] + path},
+                        'instance_attribution': 'per occurrence on LEMMATIZED_AS / IN_SENSE edge qualification (sig, inst, norm, epos)'}))
+                    b.edge('HAS_SENSE', lid, sense_id, rid, attribution='source record of the first attestation in selection order; the sense is shared by all attestations')
+                b.edge('IN_SENSE', wid_, sense_id, rid, basis='ORACC contextual sense on this lemmatization instance; English lexical gloss, not a translation',
+                       sig=node.get('sig'), inst=node.get('inst'), payload_pointer=m['payload_pointer'] + path)
                 stats['words_with_sense'] += 1
 
         walk(doc.get('cdl', []), '/cdl')
@@ -226,9 +231,9 @@ def map_selection(b: Builder, payload: bytes, members: list[dict], project: str)
 def trace_word(snapshot: Path, word_id: str, parent_root: Path | None = None) -> dict:
     """Re-resolve a WordToken inside the snapshot payload and (optionally) inside the parent zip member."""
     from .storage import verify
-    from .query import connect
+    from .query import open_verified
     manifest = verify(snapshot)
-    db = connect(snapshot)
+    db = open_verified(snapshot, manifest)
     try:
         row = db.execute('SELECT w.source_locator,w.form,s.source_record_id FROM word_token w JOIN sequence_version s ON s.id=w.sequence_id WHERE w.id=?', [word_id]).fetchone()
         if row is None: raise ValueError('unknown word ID')

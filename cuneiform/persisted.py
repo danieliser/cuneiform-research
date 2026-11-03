@@ -5,19 +5,50 @@ import json
 import time
 import duckdb
 from .model import canonical, digest, identity
-from .query import connect, motif, array_count
-from .storage import verify, file_sha256
+from .query import connect, open_verified, motif, array_count
+from .storage import verify, verified, file_sha256, publication_of, snapshot_identity
 from .projections import lookup, report
+
+LATENCY_NOTE = 'latency_ms is query-only (SQL after the snapshot was verified); end_to_end_ms includes verification, which hashes every payload file'
+
+
+class ScopeMismatch(ValueError):
+    """A caller-supplied namespace/snapshot cannot match the verified snapshot: an error, never an empty result."""
+
+
+class LayerUnavailable(ValueError):
+    """The snapshot has no rows for the layer an organization reads. Unavailable is not zero."""
+    def __init__(self, organization: str, table: str, source: str):
+        super().__init__(f'layer unavailable: {organization!r} reads {table}, which has no rows in this {source} snapshot (not loaded; not a zero count)')
+        self.organization, self.table, self.source = organization, table, source
+
+
+# Organization -> canonical table whose emptiness means the layer was never loaded in this snapshot.
+LAYER_OF = {'words': 'word_token', 'lemmas': 'lemma', 'translations': 'translation_segment', 'sequence': 'occurrence', 'occurrence': 'occurrence',
+            'span': 'occurrence', 'postings': 'occurrence', 'motifs': 'occurrence', 'reverse-postings': 'occurrence', 'reverse-motifs': 'occurrence',
+            'catalog': 'artifact'}
+
+
+def input_identity(manifest: dict) -> str:
+    """Contract-independent identity of a snapshot's inputs: equal for a legacy snapshot and a manifest-3 rebuild of the
+    same inputs (the legacy ID formula). Lets discovery group same-input snapshots without merging them."""
+    parts = [manifest['namespace'], manifest['source'], manifest['raw_sha256'], manifest['schema_version'], manifest['parser_version'], manifest['record_id'], manifest['source_url']]
+    if manifest['schema_version'] != '1': parts.append(manifest['projection_spec'])
+    return snapshot_identity(*parts, contract=None)
 
 EXPORTER = 'portable-graph-1'
 
 
 def scope(path: Path, manifest: dict | None=None) -> dict:
     """What population a snapshot's counts describe. Cohort and selection snapshots are samples, never the corpus."""
-    manifest = manifest or verify(path)
+    if manifest is None:
+        checked = verified(path); manifest = checked['manifest']; publication = checked['publication']
+    else:
+        publication = publication_of(path, manifest)   # ledger check only; the caller verified content
     src = manifest['source']
     base = {'snapshot_id': manifest['snapshot_id'], 'source': src, 'namespace': manifest['namespace'], 'snapshot_contract': manifest.get('snapshot_contract'),
-            'records_in_snapshot': manifest['counts'].get('source_record'), 'rights_status': manifest['rights'].get('status')}
+            'identity_formula': manifest.get('snapshot_contract') or 'legacy (pre-manifest-3)', 'input_identity': input_identity(manifest),
+            'records_in_snapshot': manifest['counts'].get('source_record'), 'rights_status': manifest['rights'].get('status'), 'publication': publication}
     if src == 'ebl-cohort':
         c = json.loads((path/'cohort.json').read_text())   # bound to the manifest by hash in verify()
         p = c['parent']
@@ -39,33 +70,50 @@ def scope(path: Path, manifest: dict | None=None) -> dict:
 
 
 def lookup_snapshot(path: Path, organization: str, value: str='', *, namespace=None, snapshot=None, **options) -> dict:
-    manifest = verify(path)
-    db = connect(path)
+    started = time.monotonic()
+    checked = verified(path); manifest = checked['manifest']
+    verify_ms = round((time.monotonic() - started) * 1000, 1)
+    # A verified snapshot has exactly one textual scope. An explicit override that cannot match it is an error.
+    if namespace is not None and namespace != manifest['namespace']:
+        raise ScopeMismatch(f'namespace {namespace!r} is not this snapshot\'s namespace {manifest["namespace"]!r}')
+    if snapshot is not None and snapshot != manifest['snapshot_id']:
+        raise ScopeMismatch(f'snapshot {snapshot!r} is not the verified snapshot {manifest["snapshot_id"]}')
+    table = LAYER_OF.get(organization)
+    if table is not None and not manifest['counts'].get(table):
+        raise LayerUnavailable(organization, table, manifest['source'])
+    db = open_verified(path, manifest)
     try:
-        started = time.monotonic()
+        t = time.monotonic()
         if organization == 'report':
             result = report(db)
         else:
-            # A verified snapshot has exactly one textual scope: default the explicit scope from its manifest.
-            result = lookup(db, organization, value, namespace=namespace or manifest['namespace'], snapshot=snapshot or manifest['snapshot_id'], **options)
-        return dict(result, snapshot=manifest['snapshot_id'], scope=scope(path, manifest), latency_ms=round((time.monotonic() - started) * 1000, 1))
+            result = lookup(db, organization, value, namespace=manifest['namespace'], snapshot=manifest['snapshot_id'], **options)
+        query_ms = round((time.monotonic() - t) * 1000, 1)
     finally:
         db.close()
+    out = dict(result, snapshot=manifest['snapshot_id'], scope=scope(path, manifest))
+    out.update(latency_ms=query_ms, latency_scope='query-only',
+               timing={'verify_ms': verify_ms, 'query_ms': query_ms, 'end_to_end_ms': round((time.monotonic() - started) * 1000, 1), 'note': LATENCY_NOTE})
+    return out
 
 
 def parity(path: Path, pattern: list[str], field: str='signs') -> dict:
     """Independent graph traversal, sequence-array scan and materialized n-gram index counts for one motif."""
+    started = time.monotonic()
     manifest = verify(path)
+    verify_ms = round((time.monotonic() - started) * 1000, 1)
     out = {'snapshot': manifest['snapshot_id'], 'pattern': pattern, 'field': field, 'scope': scope(path, manifest)}
-    t = time.monotonic(); graph = motif(path, pattern, field); out['graph_ms'] = round((time.monotonic() - t) * 1000, 1)
-    t = time.monotonic(); out['array'] = array_count(path, pattern, field); out['array_ms'] = round((time.monotonic() - t) * 1000, 1)
-    db = connect(path)
+    db = open_verified(path, manifest)   # one verification for all three paths
     try:
+        t = time.monotonic(); graph = motif(db, pattern, field); out['graph_ms'] = round((time.monotonic() - t) * 1000, 1)
+        t = time.monotonic(); out['array'] = array_count(db, pattern, field); out['array_ms'] = round((time.monotonic() - t) * 1000, 1)
         t = time.monotonic()
         indexed = lookup(db, 'motifs', canonical(pattern), namespace=manifest['namespace'], snapshot=manifest['snapshot_id'], field=field, limit=1)
         out['index_ms'] = round((time.monotonic() - t) * 1000, 1)
     finally:
         db.close()
+    out['timing'] = {'verify_ms': verify_ms, 'end_to_end_ms': round((time.monotonic() - started) * 1000, 1),
+                     'note': 'graph_ms/array_ms/index_ms are query-only; end_to_end_ms includes the single snapshot verification'}
     out.update({'graph': graph['occurrences'], 'index': indexed['count'], 'witnesses': graph['witnesses'], 'artifacts': graph['artifacts'],
                 'denominators': graph['denominators'], 'evidence': graph['evidence'], 'policy': graph['policy'], 'gap_extent': graph['gap_extent'],
                 'parity': graph['occurrences'] == out['array'] == indexed['count'], 'example_match': graph['matches'][0] if graph['matches'] else None})
@@ -86,7 +134,7 @@ def export_graph(path: Path, config) -> dict:
     stage = target.parent/('.pending-' + target.name)
     stage.mkdir(parents=True)
     try:
-        db = connect(path)
+        db = open_verified(path, manifest)
         try:
             dangling = db.execute('SELECT count(*) FROM portable_edge e WHERE NOT EXISTS (SELECT 1 FROM nodes n WHERE n.id=e.source_id) OR NOT EXISTS (SELECT 1 FROM nodes n WHERE n.id=e.target_id)').fetchone()[0]
             if dangling: raise ValueError(f'{dangling} portable edges have missing endpoints; export refused')
@@ -115,7 +163,7 @@ def catalog_link(paths: list[Path], key: str) -> dict:
     out = []
     for path in paths:
         manifest = verify(path)
-        db = connect(path)
+        db = open_verified(path, manifest)
         try:
             claims = [dict(zip(['claim_id','subject_artifact','object_key','status','rationale','details'], r)) for r in db.execute("SELECT id,subject_id,object_key,status,rationale,details FROM claim WHERE predicate='catalog_alias' AND object_key=? ORDER BY id", [key]).fetchall()]
             for c in claims:

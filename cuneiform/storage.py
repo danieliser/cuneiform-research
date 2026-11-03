@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 import json
+import os
 import re
 import shutil
 import time
@@ -18,7 +19,9 @@ MiB=1024**2
 SELECTION_SOURCES={'oracc-selection','cdli-selection'}
 # Bumped whenever manifest/payload contract changes, so a revised build can never reuse an existing snapshot ID.
 SNAPSHOT_CONTRACT='manifest-3'
-LEDGER='.publication-ledger.jsonl'
+from . import publication as _publication
+from .publication import LOCK, Ledger, PublicationError, check_published, discard_stage, publish_dir, seal
+LEDGER=_publication.LEDGER   # append-only publication ledger file name (protocol in cuneiform/publication.py)
 
 
 def snapshot_identity(*parts, contract: str | None=SNAPSHOT_CONTRACT) -> str:
@@ -68,7 +71,46 @@ def inspect(source: str, path: Path, config: Config) -> dict:
     return inspect_bytes(source, read_bounded(path, config))
 
 
-def verify(snapshot: Path, expected_sid: str | None=None) -> dict:
+def in_store(snapshot: Path) -> bool:
+    """A directory beside a publication ledger (or lock) is in a store and is ledger-checked on every read."""
+    folder=os.path.dirname(os.path.realpath(snapshot))
+    return os.path.exists(os.path.join(folder,LEDGER)) or os.path.exists(os.path.join(folder,LOCK))
+
+
+STANDALONE={'status':'standalone-not-ledger-checked','ledger_checked':False,
+            'note':'content verified only (every payload hash, identity and bindings); no publication ledger beside this directory, so it is not checked against what was published'}
+
+
+def verified(snapshot: Path, expected_sid: str | None=None, *, ledger: str='auto') -> dict:
+    """Content verification plus publication check. ledger: 'auto' (checked when the directory is in a store),
+    'require' (must be ledgered and match), or 'skip' (content only; caller labels the result as not ledger-checked)."""
+    if ledger not in ('auto','require','skip'): raise ValueError('ledger mode must be auto, require or skip')
+    manifest=verify_content(snapshot,expected_sid)
+    return {'manifest':manifest,'publication':publication_of(snapshot,manifest,ledger)}
+
+
+def verify_content(snapshot: Path, expected_sid: str | None=None) -> dict:
+    """Relocatable content verification only: manifest digest, identity, inventory, every file hash, bindings."""
+    return verify(snapshot,expected_sid,ledger='skip')
+
+
+def publication_of(snapshot: Path, manifest: dict, ledger: str='auto') -> dict:
+    """Ledger check for an already content-verified manifest (no re-hashing of payload files)."""
+    snapshot=Path(snapshot)
+    if ledger=='skip' or (ledger=='auto' and not in_store(snapshot)): return dict(STANDALONE)
+    folder=snapshot.resolve().parent
+    if snapshot.resolve().name!=manifest['snapshot_id']:
+        raise PublicationError(f'store directory {snapshot.name} holds manifest of {manifest["snapshot_id"]}; refusing','misplaced')
+    if not os.path.exists(folder/LEDGER):
+        raise PublicationError(f'{manifest["snapshot_id"]}: store {folder} has no publication ledger; refusing to serve unledgered snapshots','not-in-ledger')
+    return check_published(Ledger(folder),manifest['snapshot_id'],manifest,snapshot/'manifest.json')
+
+
+def verify(snapshot: Path, expected_sid: str | None=None, *, ledger: str='auto') -> dict:
+    """Return the verified manifest: manifest digest, identity, inventory, every file hash and bindings (relocatable).
+    Inside a store (ledger beside the directory) the manifest must also be the ledger's published one; ledger='skip'
+    is content-only and ledger='require' refuses anything not ledgered."""
+    if ledger not in ('auto','require','skip'): raise ValueError('ledger mode must be auto, require or skip')
     manifest=json.loads((snapshot/'manifest.json').read_text())
     if manifest.get('schema_version') not in {'1',SCHEMA_VERSION}:
         raise ValueError('unsupported schema version; explicit migration required')
@@ -118,6 +160,7 @@ def verify(snapshot: Path, expected_sid: str | None=None) -> dict:
         body={k:v for k,v in bound.items() if k!='manifest_sha256'}
         if digest(canonical(body).encode())!=bound.get('manifest_sha256') or bound['manifest_sha256']!=manifest['selection']['manifest_sha256'] or bound['payload_sha256']!=manifest['raw_sha256'] or bound['selection_id']!=manifest['record_id']:
             raise ValueError('selection binding mismatch')
+    publication_of(snapshot,manifest,ledger)
     return manifest
 
 
@@ -129,9 +172,7 @@ def import_source(source: str, path: Path, config: Config, namespace: str | None
     namespace=namespace or source
     # Record the explicit source citation in identity: a different attribution must not silently reuse a manifest.
     sid=snapshot_identity(namespace,source,digest(data),SCHEMA_VERSION,PARSER_VERSION,record_id,source_url,projection_spec)
-    dest=config.root/'snapshots'/sid
-    if dest.exists(): return {'snapshot':sid,'reused':True,'manifest':verify(dest,sid)}
-    assert_unpublished(config,sid)
+    if (existing:=existing_snapshot(config,sid)): return existing
     if dry_run:
         try:
             config.guard(info['estimated_additional_bytes']); admission='allowed'
@@ -149,6 +190,13 @@ def materialize(config: Config, sid: str, data: bytes, load, projections: Projec
     """Stage, ingest, validate, project, export, hash and atomically publish one immutable snapshot."""
     dest=config.root/'snapshots'/sid
     dest.parent.mkdir(parents=True,exist_ok=True)
+    with build_lock(dest.parent,sid):
+        # Another cooperating writer may have published this ID while we waited: reuse, never build twice.
+        if (existing:=existing_snapshot(config,sid)): return dict(existing,raced=True)
+        return _materialize(config,sid,data,load,projections,projection_spec,meta,extra_files,memory,dest)
+
+
+def _materialize(config, sid, data, load, projections, projection_spec, meta, extra_files, memory, dest) -> dict:
     stage=dest.parent/('.pending-'+uuid.uuid4().hex)
     stage.mkdir()
     timings={}
@@ -187,11 +235,56 @@ def materialize(config: Config, sid: str, data: bytes, load, projections: Projec
         manifest['manifest_sha256']=digest(canonical(manifest).encode())
         (stage/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n')
         config.guard(0)
-        publish(config,stage,dest,manifest)
+        if publish(config,stage,dest,manifest)=='raced':
+            discard_owned_stage(config,stage,sid,None)
+            return {'snapshot':sid,'reused':True,'raced':True,'manifest':verify(dest,sid,ledger='require')}
         return {'snapshot':sid,'reused':False,'manifest':manifest}
-    except BaseException:
-        if stage.exists(): shutil.rmtree(stage)
+    except BaseException as exc:
+        discard_owned_stage(config,stage,sid,exc)
         raise
+
+
+def build_lock(folder: Path, sid: str):
+    """Per-ID exclusive build lock so concurrent writers of one ID build it once (the loser reuses the result)."""
+    from contextlib import contextmanager
+    import fcntl
+    @contextmanager
+    def held():
+        locks=folder/'.locks'; locks.mkdir(exist_ok=True)
+        with (locks/(sid.replace(':','-')+'.lock')).open('a') as handle:
+            fcntl.flock(handle,fcntl.LOCK_EX)
+            try: yield
+            finally: fcntl.flock(handle,fcntl.LOCK_UN)
+    return held()
+
+
+def discard_owned_stage(config: Config, stage: Path, sid: str, exc: BaseException | None) -> None:
+    """Remove only the stage this call created. Never raises: a cleanup failure is attached to the original exception
+    and written as a recovery receipt. A stage named by an open reservation is kept for explicit recovery."""
+    if not stage.exists(): return
+    try:
+        st=Ledger(stage.parent).status(sid)
+        if st.state=='reserved' and st.stage==stage.name:
+            if exc is not None: exc.add_note(f'stage {stage} is named by the open reservation of {sid}; kept for `python -m cuneiform publication-recover {sid}`')
+            return
+    except (ValueError,OSError) as ledger_exc:
+        if exc is not None: exc.add_note(f'could not read publication ledger during cleanup ({ledger_exc}); stage {stage} kept')
+        return
+    try:
+        discard_stage(stage)
+    except BaseException as cleanup_exc:
+        receipt={'kind':'stage-cleanup-failure','stage':str(stage),'snapshot_id':sid,'at':datetime.now(timezone.utc).isoformat(),
+                 'original_error':repr(exc) if exc is not None else None,'cleanup_error':repr(cleanup_exc),
+                 'ledger_state':'no reservation names this stage; nothing was published from it',
+                 'action':f'inspect, then: python -m cuneiform publication-clean-stage {stage.name}'}
+        note=f'stage cleanup failed ({cleanup_exc!r}); {stage} remains. '
+        try:
+            target=stage.parent/'.recovery'/(stage.name+'.json'); target.parent.mkdir(exist_ok=True)
+            target.write_text(json.dumps(receipt,indent=1)+'\n'); note+=f'Recovery receipt: {target}'
+        except BaseException as receipt_exc:
+            note+=f'Recovery receipt could not be written ({receipt_exc!r}): {json.dumps(receipt)}'
+        if exc is not None: exc.add_note(note)
+        else: raise
 
 
 # Corpus snapshots raise only the explicit ceilings; defaults for small imports are unchanged.
@@ -214,9 +307,7 @@ def import_cohort(cohort_dir: Path, config: Config, projections: ProjectionConfi
     projection_spec={'revision':REVISION,'config':asdict(projections)}
     source='ebl-cohort'; record_id=cohort['cohort_id']; source_url=cohort['parent'].get('url')
     sid=snapshot_identity(namespace,source,digest(data),SCHEMA_VERSION,PARSER_VERSION,record_id,source_url,projection_spec)
-    dest=config.root/'snapshots'/sid
-    if dest.exists(): return {'snapshot':sid,'reused':True,'manifest':verify(dest,sid)}
-    assert_unpublished(config,sid)
+    if (existing:=existing_snapshot(config,sid)): return existing
     # Admission estimate before writing: 200x payload + 64 MiB (observed builds are well below; see CHECKPOINT).
     config.guard(len(data)*200+64*MiB)
     bound=(cohort_dir/'manifest.json').read_bytes()
@@ -288,45 +379,61 @@ def fetch(url: str, allowlist: Path, config: Config, limit: int=256*1024) -> dic
     return {'path':str(target),'bytes':len(data),'sha256':sha,'source_url':url,'rights':'not inferred from public access'}
 
 
-def resolve_snapshot(config: Config, sid: str) -> Path:
+def valid_sid(sid: str) -> str:
     if not sid.startswith('snapshot:') or any(c not in '0123456789abcdef' for c in sid[9:]) or len(sid)!=41:
         raise ValueError('invalid snapshot ID')
-    result=config.root/'snapshots'/sid
-    verify(result,sid)
+    return sid
+
+
+def resolve_snapshot(config: Config, sid: str) -> Path:
+    """Store read: content-verified AND the ledger's published manifest. Unledgered or mismatched copies are refused."""
+    result=config.root/'snapshots'/valid_sid(sid)
+    verify(result,sid,ledger='require')
     return result
 
 
-def _ledger(config: Config) -> list[dict]:
-    path=config.root/'snapshots'/LEDGER
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+def store_path(config: Config, sid: str) -> Path:
+    """Store location for a read that verifies itself (persisted/query functions call verify(), which is ledger-checked
+    in a store). Requires the store ledger so the read cannot silently fall back to the standalone label."""
+    result=config.root/'snapshots'/valid_sid(sid)
+    if not os.path.exists(result.parent/LEDGER): raise PublicationError(f'store {result.parent} has no publication ledger; refusing','not-in-ledger')
+    return result
+
+
+def store_ledger(config: Config) -> Ledger:
+    return Ledger(config.root/'snapshots')
+
+
+def existing_snapshot(config: Config, sid: str) -> dict | None:
+    """Writer-side decision before building: a reusable published snapshot, None (free to build), or a refusal."""
+    from .publication import refusal
+    dest=config.root/'snapshots'/sid
+    st=store_ledger(config).status(sid)
+    if st.state in ('unpublished','aborted') and not dest.exists(): return None
+    if st.state=='published' and dest.exists(): return {'snapshot':sid,'reused':True,'manifest':verify(dest,sid,ledger='require')}
+    if st.state in ('unpublished','aborted'):
+        raise PublicationError(f'{dest} exists but {sid} has no publication record (for example, an interrupted pre-ledger-2 publish). '
+                               f'Refusing to reuse or replace it. If it is the intended bytes run `python -m cuneiform publication-adopt {sid} --reason ...`; otherwise move it aside.','unledgered')
+    raise refusal(st,dest)
 
 
 def assert_unpublished(config: Config, sid: str) -> None:
-    if any(e['snapshot_id']==sid for e in _ledger(config)):
-        raise ValueError(f'{sid} was already published (ledger) but is missing from the store; restore it, never rebuild under the same ID')
+    """Compatibility wrapper: refuse unless the ID is free to build."""
+    if existing_snapshot(config,sid) is not None:
+        raise PublicationError(f'{sid} is already published','published')
 
 
-def publish(config: Config, stage: Path, dest: Path, manifest: dict) -> None:
-    """Atomic, exclusive, append-only publication: one rename of a complete staged directory, then read-only.
+def publish(config: Config, stage: Path, dest: Path, manifest: dict) -> str:
+    """Seal the stage, then reserve -> rename -> commit through the ledger (see cuneiform.publication).
 
-    The ledger records every published ID; an ID that was ever published can never be published again, even if
-    its directory is deleted. Revisions must change the identity (parser, projection config, contract, payload).
-    """
-    import fcntl, os
-    folder=dest.parent
-    with (folder/'.publication.lock').open('a') as lock:
-        fcntl.flock(lock,fcntl.LOCK_EX)
-        try:
-            assert_unpublished(config,manifest['snapshot_id'])
-            if dest.exists(): raise ValueError('snapshot directory already exists; refusing replacement')
-            for p in sorted(stage.rglob('*'),reverse=True): os.chmod(p,0o444 if p.is_file() else 0o555)
-            stage.rename(dest)   # same filesystem: atomic; readers see nothing or the complete snapshot
-            os.chmod(dest,0o555)
-            entry={'snapshot_id':manifest['snapshot_id'],'manifest_sha256':manifest['manifest_sha256'],'snapshot_contract':manifest.get('snapshot_contract'),'published_at':datetime.now(timezone.utc).isoformat()}
-            with (folder/LEDGER).open('a') as out:
-                out.write(json.dumps(entry)+'\n'); out.flush(); os.fsync(out.fileno())
-        finally:
-            fcntl.flock(lock,fcntl.LOCK_UN)
+    An ID that was ever reserved for some bytes is never published with different bytes, even after deletion or
+    a crash. Revisions must change the identity (parser, projection config, contract, payload)."""
+    seal(stage)
+    from .publication import file_digest
+    def matches(path):
+        try: return verify(path,manifest['snapshot_id'],ledger='require')['manifest_sha256']==manifest['manifest_sha256']
+        except (ValueError,OSError,KeyError): return False
+    return publish_dir(store_ledger(config),stage,dest,manifest['snapshot_id'],manifest['manifest_sha256'],file_digest(stage/'manifest.json'),matches)
 
 
 def projection_assets(config):

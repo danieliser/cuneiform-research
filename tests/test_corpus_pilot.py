@@ -204,7 +204,10 @@ class CorpusDiskTests(unittest.TestCase):
         os.chmod(path, 0o644); original = path.read_bytes(); path.write_bytes(original.replace(b'A B', b'A X')); self.assertNotEqual(original, path.read_bytes())
         with self.assertRaisesRegex(ValueError, 'parent'): trace(moved, occ, parent_root=cfg.root)
         with self.assertRaisesRegex(ValueError, 'parent slice mismatch'): verify_cohort(directory, path)
-        payload = directory/'payload.json'; payload.write_bytes(payload.read_bytes()[:-2] + b' ]')
+        # New cohorts are sealed read-only; tampering needs an explicit owner chmod and is still detected.
+        payload = directory/'payload.json'
+        with self.assertRaises(PermissionError): payload.write_bytes(b'x')
+        os.chmod(directory, 0o755); os.chmod(payload, 0o644); payload.write_bytes(payload.read_bytes()[:-2] + b' ]')
         with self.assertRaisesRegex(ValueError, 'payload integrity'): verify_cohort(directory)
 
     def test_spool_load_equals_executemany(self):
@@ -274,7 +277,8 @@ class PublicationTests(unittest.TestCase):
             snap = cfg.root/'snapshots'/r['snapshot']
             self.assertEqual(r['manifest']['snapshot_contract'], 'manifest-3')
             ledger = [json.loads(l) for l in (cfg.root/'snapshots'/LEDGER).read_text().splitlines()]
-            self.assertEqual([e['snapshot_id'] for e in ledger], [r['snapshot']])
+            self.assertEqual([(e['event'], e['snapshot_id']) for e in ledger], [('reserve', r['snapshot']), ('commit', r['snapshot'])])
+            self.assertEqual({e['manifest_sha256'] for e in ledger}, {r['manifest']['manifest_sha256']})
             self.assertEqual(snap.stat().st_mode & 0o777, 0o555)
             self.assertTrue(all(p.stat().st_mode & 0o222 == 0 for p in snap.rglob('*')))
             self.assertTrue(import_source('ebl', ROOT/'fixtures/ebl-synthetic.json', cfg)['reused'])
