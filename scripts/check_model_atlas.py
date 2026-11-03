@@ -542,49 +542,195 @@ def str_values(pkg: Package, expr, frame, depth: int = 0) -> set[str]:
     return {'*'}
 
 
-def computed(expr) -> bool:
-    """A manifest_sha256 value produced here (digest call, constant, ...), not copied from another record
-    (a name, attribute, subscript or `.get(...)` read)."""
-    if isinstance(expr, (ast.Name, ast.Attribute, ast.Subscript)):
-        return False
-    return not (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == 'get')
+def name_stores(pkg: Package, scope, name: str) -> int:
+    """How many times `name` is bound, rebound or deleted in `scope` (nested `global`/`nonlocal` count as rebinding)."""
+    count = 0
+    for n in ast.walk(scope):
+        if isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names:
+            count += 2
+        elif pkg.scope_of(n) is not scope:
+            continue
+        elif isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, (ast.Store, ast.Del)):
+            count += 1
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            count += sum((a.asname or a.name).split('.')[0] == name for a in n.names)
+        elif isinstance(n, ast.ExceptHandler) and n.name == name:
+            count += 1
+    return count
+
+
+def digest_origin(pkg: Package, expr, frame, depth: int = 0) -> str:
+    """Where a manifest_sha256 value comes from: 'copy' when it is read from another record (attribute, subscript or
+    `.get(...)`), 'computed' when it is produced here (digest call, constant, ...). A name is resolved through its
+    lexical binding: a local bound once to a computed value is computed, and a parameter takes the origin of every
+    call-site argument. A rebound, conditionally bound or unresolvable name raises Unsupported; it is never assumed
+    to be a copy."""
+    rel, scope = frame[0], frame[1]
+    if depth > 8:
+        raise Unsupported(rel, expr, 'manifest_sha256 value resolution too deep')
+    if isinstance(expr, (ast.Attribute, ast.Subscript)):
+        return 'copy'
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == 'get':
+        return 'copy'
+    if not isinstance(expr, ast.Name):
+        return 'computed'
+    name = expr.id
+    found = find_binding(pkg, rel, scope, name, pos(expr))
+    if found[0] == 'param':
+        func = found[1]
+        if name_stores(pkg, func, name):
+            raise Unsupported(rel, expr, f'parameter `{name}` is rebound in `{func.name}`; its manifest_sha256 origin is unknown')
+        origins = {digest_origin(pkg, arg, cframe, depth + 1) for arg, cframe in call_site_args(pkg, rel, func, name)}
+        return 'computed' if 'computed' in origins else 'copy'
+    _, value, bframe, _ = found
+    if name_stores(pkg, bframe[1], name) > 1:
+        raise Unsupported(bframe[0], expr, f'`{name}` is bound more than once; its manifest_sha256 origin is unknown')
+    return digest_origin(pkg, value, bframe, depth + 1)
+
+
+SIGN_KEY = 'manifest_sha256'
+
+
+def mutator_writes(call: ast.Call) -> tuple[ast.AST | None, list] | None:
+    """For `x.update(...)`, `x.setdefault(k, v)`, `x.__setitem__(k, v)` and `[operator.]setitem(x, k, v)`: the receiver
+    and the (key, value) pairs it writes, a key of None standing for a merged dict expression. None for other calls."""
+    f, args = call.func, list(call.args)
+    if isinstance(f, ast.Attribute) and f.attr in ('update', 'setdefault', '__setitem__'):
+        recv = f.value
+        if isinstance(recv, ast.Name) and recv.id == 'dict':          # dict.update(x, ...): unbound method form
+            if not args:
+                return None
+            recv = args.pop(0)
+        if f.attr == 'update':
+            return recv, [(None, a) for a in args] + [(k.arg, k.value) for k in call.keywords]
+        if args:
+            return recv, [(const_str(args[0]), args[1] if len(args) > 1 else ast.Constant(None))]
+        return None
+    if ((isinstance(f, ast.Name) and f.id == 'setitem') or (isinstance(f, ast.Attribute) and f.attr == 'setitem')) and len(call.args) == 3:
+        return call.args[0], [(const_str(call.args[1]), call.args[2])]
+    return None
+
+
+def signs(pkg: Package, value, frame) -> bool:
+    return digest_origin(pkg, value, frame) == 'computed'
+
+
+def dict_signs(pkg: Package, n, frame) -> bool:
+    """A dict literal or dict(...) call that writes a computed manifest_sha256."""
+    if isinstance(n, ast.Dict):
+        return any(const_str(k) == SIGN_KEY and signs(pkg, v, frame) for k, v in zip(n.keys, n.values))
+    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'dict':
+        return any(k.arg == SIGN_KEY and signs(pkg, k.value, frame) for k in n.keywords)
+    return False
+
+
+def written_after(pkg: Package, rel: str, scope, name: str, after) -> Unsupported | None:
+    """A key-changing write to `name` after it was signed (N2). Such keys would not be compared with the atlas."""
+    for n in ast.walk(scope):
+        if pkg.scope_of(n) is not scope or not hasattr(n, 'lineno') or pos(n) <= after:
+            continue
+        key = None
+        if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
+            targets = n.targets if isinstance(n, (ast.Assign, ast.Delete)) else [n.target]
+            hit = [t for t in targets if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id == name]
+            if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) and n.target.id == name:
+                hit = [n.target]
+            if not hit:
+                continue
+            key = const_str(hit[0].slice) if isinstance(hit[0], ast.Subscript) else '|='
+        elif isinstance(n, ast.Call):
+            w = mutator_writes(n)
+            f = n.func
+            if w and isinstance(w[0], ast.Name) and w[0].id == name:
+                key = ','.join(k if k is not None else '<merged dict>' for k, _ in w[1])
+            elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id == name and f.attr in MUTATORS:
+                key = f.attr
+            else:
+                continue
+        else:
+            continue
+        if key == SIGN_KEY:
+            continue
+        return Unsupported(rel, n, f"`{name}` gets key `{key}` after it is signed (line {after[0]}); keys written after "
+                                   'signing are not compared with the atlas. Add them before the signing line')
+    return None
 
 
 def snapshot_manifests(pkg: Package) -> tuple[list[dict], list[Unsupported]]:
     """Find every signing site in the package and keep those whose key set carries snapshot_id.
 
-    A signing site is any write of a computed `manifest_sha256` value: `x['manifest_sha256'] = f(...)`, a dict
-    literal `{..., 'manifest_sha256': f(...)}` or `dict(..., manifest_sha256=f(...))`, plus `manifest = {...}`.
-    Records that only copy a digest (ledger rows, receipts, bindings) are not signing sites. A site whose keys
-    cannot be resolved is a problem (fail closed), whatever its variable is called."""
+    A signing site is any write of a computed `manifest_sha256` value (see digest_origin): `x['manifest_sha256'] = v`,
+    `x.update(manifest_sha256=v)` / `x.update({...})`, `x.setdefault('manifest_sha256', v)`, `[operator.]setitem`,
+    a dict literal `{..., 'manifest_sha256': v}` or `dict(..., manifest_sha256=v)`, plus `manifest = {...}`.
+    Records that only copy a digest (ledger rows, receipts, bindings) are not signing sites. A site whose keys or
+    digest origin cannot be resolved is a problem (fail closed), whatever its variable is called."""
     sites, early = {}, []
     for rel, tree in pkg.modules.items():
         for n in ast.walk(tree):
             scope = pkg.scope_of(n)
-            if isinstance(n, ast.Dict) and any(const_str(k) == 'manifest_sha256' and computed(v) for k, v in zip(n.keys, n.values)):
-                sites[(rel, id(n))] = (rel, scope, n, pos(n))
-            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'dict' and any(
-                    k.arg == 'manifest_sha256' and computed(k.value) for k in n.keywords):
-                sites[(rel, id(n))] = (rel, scope, n, pos(n))
-            if not isinstance(n, ast.Assign):
-                continue
-            for t in n.targets:
-                if isinstance(t, ast.Subscript) and const_str(t.slice) == 'manifest_sha256' and computed(n.value):
-                    if not isinstance(t.value, ast.Name):
-                        early.append(Unsupported(rel, n, f'signed record `{ast.unparse(t.value)[:40]}` is not a plain name'))
+            frame = (rel, scope, pos(n) if hasattr(n, 'lineno') else END)
+            try:
+                if isinstance(n, (ast.Dict, ast.Call)) and dict_signs(pkg, n, frame):
+                    parent = pkg.parent.get(id(n))
+                    if isinstance(parent, (ast.BinOp, ast.AugAssign)):
+                        raise Unsupported(rel, n, 'a signed dict merged with an operator (`|`, `|=`, ...); build it as '
+                                                  "`{**body, 'manifest_sha256': ...}` instead")
+                    if isinstance(parent, ast.keyword):
+                        parent = pkg.parent.get(id(parent))
+                    if isinstance(parent, ast.Call) and mutator_writes(parent):
+                        continue                      # merged into a receiver; that call is the site
+                    sites[(rel, id(n))] = (rel, scope, n, pos(n), None)
+                    if isinstance(parent, ast.Assign) and len(parent.targets) == 1 and isinstance(parent.targets[0], ast.Name):
+                        late = written_after(pkg, rel, scope, parent.targets[0].id, (parent.end_lineno, parent.end_col_offset))
+                        if late:
+                            early.append(late)
+                    continue
+                if isinstance(n, ast.Call) and (w := mutator_writes(n)):
+                    recv, pairs = w
+                    signed = any(k == SIGN_KEY and signs(pkg, v, frame) for k, v in pairs) or any(
+                        k is None and dict_signs(pkg, v, frame) for k, v in pairs)
+                    if not signed:
                         continue
-                    sites[(rel, id(scope), t.value.id)] = (rel, scope, t.value.id, (n.lineno, n.col_offset + 1))
-                if isinstance(t, ast.Name) and t.id == 'manifest' and (isinstance(n.value, ast.Dict) or (
-                        isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and n.value.func.id == 'dict')):
-                    sites.setdefault((rel, id(scope), 'manifest'), (rel, scope, 'manifest', END))
+                    if not isinstance(recv, ast.Name):
+                        raise Unsupported(rel, n, f'signed record `{ast.unparse(recv)[:40]}` is not a plain name')
+                    sites[(rel, id(scope), recv.id, pos(n))] = (rel, scope, recv.id, pos(n), n)
+                    late = written_after(pkg, rel, scope, recv.id, (n.end_lineno, n.end_col_offset))
+                    if late:
+                        early.append(late)
+                    continue
+                if not isinstance(n, ast.Assign):
+                    continue
+                for t in n.targets:
+                    if isinstance(t, ast.Subscript) and const_str(t.slice) == SIGN_KEY and signs(pkg, n.value, frame):
+                        if not isinstance(t.value, ast.Name):
+                            raise Unsupported(rel, n, f'signed record `{ast.unparse(t.value)[:40]}` is not a plain name')
+                        sites[(rel, id(scope), t.value.id)] = (rel, scope, t.value.id, (n.lineno, n.col_offset + 1), None)
+                        late = written_after(pkg, rel, scope, t.value.id, (n.end_lineno, n.end_col_offset))
+                        if late:
+                            early.append(late)
+                    if isinstance(t, ast.Name) and t.id == 'manifest' and (isinstance(n.value, ast.Dict) or (
+                            isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and n.value.func.id == 'dict')):
+                        sites.setdefault((rel, id(scope), 'manifest'), (rel, scope, 'manifest', END, None))
+            except Unsupported as exc:
+                early.append(exc)
     results, problems = [], early
-    for rel, scope, var, upos in sites.values():
+    for rel, scope, var, upos, call in sites.values():
         where = f"{rel}::{getattr(scope, 'name', '<module>')}"
         try:
             if isinstance(var, str):
                 paths = name_paths(pkg, var, (rel, scope, upos), upos, 0)
             else:
                 paths = [dict(p) for p in dict_paths(pkg, var, (rel, scope, upos))]
+            if call is not None:
+                frame = (rel, scope, upos)
+                added = [{}]
+                for k, v in mutator_writes(call)[1]:
+                    if k is None:
+                        added = [{**a, **q} for a in added for q in dict_paths(pkg, v, frame)]
+                    else:
+                        for a in added:
+                            a[k] = (v, frame, False)
+                paths = [{**p, **a} for p in paths for a in added]
         except Unsupported as exc:
             problems.append(exc)
             continue
@@ -2092,6 +2238,20 @@ def analyzer_cases() -> list[tuple[str, dict, object]]:
               "    manifest['manifest_sha256']='x'\n    return manifest\n")
     verify = "def verify(m):\n    required={'snapshot_id','source','rights'}\n    return required\n"
     adapters = "RIGHTS={'a':{'status':'unknown'}}\n"
+    body = "    body={'snapshot_id':1,'source':'a','rights':RIGHTS['a'],'K':1}\n"
+
+    model = "import json\ndef canonical(value):\n    return json.dumps(value, sort_keys=True)\n"
+    r3head = head + "from .model import canonical\nimport operator\n"
+
+    def r3(label, tail, key, prefix=''):
+        return (f'analyzer: signed via {label} is a site (R3)', {
+            'adapters': adapters, 'model': model, 'storage': r3head + prefix + verify + "def imp(c):\n" + body + tail},
+            lambda keys, opt, srcs, rights, kinds: key in keys and 'manifest_sha256' in keys)
+
+    def r3fail(label, tail, text):
+        return (f'analyzer: {label} (R3)', {
+            'adapters': adapters, 'model': model, 'storage': r3head + verify + "def imp(c):\n" + body + tail}, ('unsupported', text))
+
     return [
         ('analyzer: ** spread of a local dict', {
             'adapters': adapters,
@@ -2174,6 +2334,39 @@ def analyzer_cases() -> list[tuple[str, dict, object]]:
             'adapters': adapters + "_r = RIGHTS\n_r['z'] = {}\n",
             'storage': head + verify + "def imp():\n    manifest={'snapshot_id':1,'source':'a','rights':RIGHTS['a']}\n    manifest['manifest_sha256']=0\n"},
          'rights-unsupported'),
+        # R3 (atlas-recheck-v0.2 B1): a digest routed through a local name, or written by a mutator call, is still a site.
+        r3('local name: body[k]=d where d=digest(...)', "    d=digest(canonical(body))\n    body['manifest_sha256']=d\n    return body\n", 'K'),
+        r3('local name: dict(body, manifest_sha256=d)', "    d=digest(canonical(body))\n    return dict(body, manifest_sha256=d)\n", 'K'),
+        r3("local name: {**body, 'manifest_sha256': d}", "    d=digest(canonical(body))\n    return {**body,'manifest_sha256':d}\n", 'K'),
+        r3('body.update(manifest_sha256=digest(...))', "    body.update(manifest_sha256=digest(canonical(body)))\n    return body\n", 'K'),
+        r3("body.update({'manifest_sha256': d, 'U': 1}) adds its own keys",
+           "    d=digest(canonical(body))\n    body.update({'manifest_sha256':d,'U':1})\n    return body\n", 'U'),
+        r3("dict.update(body, manifest_sha256=d)", "    d=digest(canonical(body))\n    dict.update(body, manifest_sha256=d)\n    return body\n", 'K'),
+        r3("body.setdefault('manifest_sha256', d)", "    d=digest(canonical(body))\n    body.setdefault('manifest_sha256', d)\n    return body\n", 'K'),
+        r3("operator.setitem(body, 'manifest_sha256', d)",
+           "    d=digest(canonical(body))\n    operator.setitem(body, 'manifest_sha256', d)\n    return body\n", 'K'),
+        r3('module-level digest name', "    body['manifest_sha256']=MODDIGEST\n    return body\n", 'K', prefix="MODDIGEST=digest(b'')\n"),
+        r3('parameter fed a computed digest by its only caller',
+           "    return sign(body, digest(canonical(body)))\ndef sign(rec, d):\n    rec['manifest_sha256']=d\n    return rec\n", 'K'),
+        ('analyzer: a copied digest parameter (publish_dir rows) is not a site (R3 control)', {
+            'adapters': adapters, 'model': model,
+            'storage': r3head + verify + "def row(sid, manifest_sha256):\n    return {'snapshot_id':sid,'manifest_sha256':manifest_sha256,'rowkey':1}\n"
+                                       "def imp(m):\n    manifest={'snapshot_id':1,'source':'a','rights':RIGHTS['a']}\n"
+                                       "    manifest['manifest_sha256']=digest(canonical(manifest))\n    row(1, manifest['manifest_sha256'])\n"
+                                       "    rec={'snapshot_id':1,'copykey':1}\n    d=m['manifest_sha256']\n    rec['manifest_sha256']=d\n"},
+         lambda keys, opt, srcs, rights, kinds: keys == {'snapshot_id', 'source', 'rights', 'manifest_sha256'}),
+        r3fail('a rebound digest name is unsupported, not a copy', "    d=body['x']\n    d=digest(canonical(body))\n    body['manifest_sha256']=d\n",
+               'bound more than once'),
+        r3fail('a conditionally bound digest name is unsupported', "    d=body['x']\n    if c:\n        d=digest(canonical(body))\n"
+                                                                "    body['manifest_sha256']=d\n", 'bound'),
+        r3fail('an unresolvable digest name is unsupported', "    body['manifest_sha256']=nowhere\n", 'cannot resolve name `nowhere`'),
+        r3fail('a rebound digest parameter is unsupported', "    return sign(body, body['x'])\ndef sign(rec, d):\n    rec['manifest_sha256']=d\n"
+                                                         "    d=None\n    return rec\n", 'parameter `d` is rebound'),
+        r3fail('a signed dict merged with | is unsupported', "    return body | {'manifest_sha256':digest(canonical(body))}\n", 'merged with an operator'),
+        r3fail('a key written after signing is unsupported (N2)', "    body['manifest_sha256']=digest(canonical(body))\n    body['late']=1\n",
+               'gets key `late` after it is signed'),
+        r3fail('a key written after a signed literal is unsupported (N2)', "    out={**body,'manifest_sha256':digest(canonical(body))}\n"
+                                                                          "    out.update(late2=1)\n    return out\n", 'gets key `late2`'),
         ('analyzer: source kind bound by tuple unpacking keeps its label', {
             'adapters': adapters,
             'storage': head + verify + signer + "def c(x):\n    source, ns = 'c-selection', 'c'\n"
@@ -2194,6 +2387,8 @@ def run_analyzer_case(files: dict, expect) -> tuple[bool, str]:
         kinds, kproblems = source_kinds(pkg)
         if expect == 'unsupported':
             return bool(problems), f'problems={[str(p) for p in problems]}'
+        if isinstance(expect, tuple):                 # ('unsupported', text): the specific refusal is reported
+            return any(expect[1] in str(p) for p in problems), f'problems={[str(p) for p in problems]}'
         if expect == 'rights-unsupported':
             return bool(rproblems), f'rights problems={[str(p) for p in rproblems]}'
         if problems:
