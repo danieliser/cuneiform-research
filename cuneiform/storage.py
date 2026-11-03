@@ -20,7 +20,7 @@ SELECTION_SOURCES={'oracc-selection','cdli-selection'}
 # Bumped whenever manifest/payload contract changes, so a revised build can never reuse an existing snapshot ID.
 SNAPSHOT_CONTRACT='manifest-3'
 from . import publication as _publication
-from .publication import LOCK, Ledger, PublicationError, check_published, discard_stage, publish_dir, seal
+from .publication import LOCK, Ledger, PublicationError, assert_no_symlinks, build_lock, check_published, discard_stage, locate_entry, missing_entry, publish_dir, seal
 LEDGER=_publication.LEDGER   # append-only publication ledger file name (protocol in cuneiform/publication.py)
 
 
@@ -72,19 +72,44 @@ def inspect(source: str, path: Path, config: Config) -> dict:
 
 
 def in_store(snapshot: Path) -> bool:
-    """A directory beside a publication ledger (or lock) is in a store and is ledger-checked on every read."""
-    folder=os.path.dirname(os.path.realpath(snapshot))
-    return os.path.exists(os.path.join(folder,LEDGER)) or os.path.exists(os.path.join(folder,LOCK))
+    """A directory whose lexical or resolved parent holds a publication ledger (or lock) is in a store and is
+    ledger-checked on every read. Raises PublicationError('symlinked-entry') for a symlinked store entry."""
+    return locate_entry(snapshot) is not None
+
+
+class StoreEntry(type(Path())):
+    """A snapshot path named by its store and ID (from store_path/resolve_snapshot). Reads of it always run with
+    ledger='require' and expected_sid=<its ID>, so a store read can never be served as a standalone copy or as another
+    ID. Paths derived from it (/, parent, resolve) are plain paths."""
+    store_sid: str
+
+    def with_segments(self, *segments):
+        return Path(*segments)
+
+
+def store_entry(config: 'Config', sid: str) -> StoreEntry:
+    entry=StoreEntry(config.root/'snapshots'/valid_sid(sid)); entry.store_sid=sid
+    return entry
+
+
+def _store_read(snapshot, expected_sid, ledger):
+    """Apply a StoreEntry's explicit expectations: its own ID and a required ledger."""
+    if isinstance(snapshot,StoreEntry):
+        if expected_sid is not None and expected_sid!=snapshot.store_sid: raise ValueError('snapshot identity mismatch')
+        return snapshot.store_sid,('require' if ledger=='auto' else ledger)
+    return expected_sid,ledger
 
 
 STANDALONE={'status':'standalone-not-ledger-checked','ledger_checked':False,
-            'note':'content verified only (every payload hash, identity and bindings); no publication ledger beside this directory, so it is not checked against what was published'}
+            'note':'content verified only (every payload hash, identity and bindings); this directory is not inside a store (no publication ledger or lock beside its path or its resolved path), so it is not checked against what was published'}
 
 
 def verified(snapshot: Path, expected_sid: str | None=None, *, ledger: str='auto') -> dict:
     """Content verification plus publication check. ledger: 'auto' (checked when the directory is in a store),
     'require' (must be ledgered and match), or 'skip' (content only; caller labels the result as not ledger-checked)."""
     if ledger not in ('auto','require','skip'): raise ValueError('ledger mode must be auto, require or skip')
+    expected_sid,ledger=_store_read(snapshot,expected_sid,ledger)
+    if ledger!='skip': locate_entry(snapshot)   # refuse a symlinked/escaping store entry before hashing it
     manifest=verify_content(snapshot,expected_sid)
     return {'manifest':manifest,'publication':publication_of(snapshot,manifest,ledger)}
 
@@ -96,14 +121,22 @@ def verify_content(snapshot: Path, expected_sid: str | None=None) -> dict:
 
 def publication_of(snapshot: Path, manifest: dict, ledger: str='auto') -> dict:
     """Ledger check for an already content-verified manifest (no re-hashing of payload files)."""
-    snapshot=Path(snapshot)
-    if ledger=='skip' or (ledger=='auto' and not in_store(snapshot)): return dict(STANDALONE)
-    folder=snapshot.resolve().parent
-    if snapshot.resolve().name!=manifest['snapshot_id']:
-        raise PublicationError(f'store directory {snapshot.name} holds manifest of {manifest["snapshot_id"]}; refusing','misplaced')
+    if isinstance(snapshot,StoreEntry) and manifest['snapshot_id']!=snapshot.store_sid:
+        raise PublicationError(f'store entry {snapshot.store_sid} holds the manifest of {manifest["snapshot_id"]}; refusing','misplaced')
+    _,ledger=_store_read(snapshot,None,ledger)
+    if ledger=='skip': return dict(STANDALONE)
+    entry=locate_entry(snapshot)
+    if entry is None:
+        if ledger=='require':
+            raise PublicationError(f'{snapshot} is not inside a snapshot store (no publication ledger beside it); a store read requires the ledger','not-in-ledger')
+        return dict(STANDALONE)
+    folder,name=entry
+    if name!=manifest['snapshot_id']:
+        raise PublicationError(f'store directory {name} holds the manifest of {manifest["snapshot_id"]}; refusing','misplaced')
     if not os.path.exists(folder/LEDGER):
         raise PublicationError(f'{manifest["snapshot_id"]}: store {folder} has no publication ledger; refusing to serve unledgered snapshots','not-in-ledger')
-    return check_published(Ledger(folder),manifest['snapshot_id'],manifest,snapshot/'manifest.json')
+    assert_no_symlinks(folder/name,['manifest.json',*manifest['files']])
+    return check_published(Ledger(folder),manifest['snapshot_id'],manifest,folder/name/'manifest.json')
 
 
 def verify(snapshot: Path, expected_sid: str | None=None, *, ledger: str='auto') -> dict:
@@ -111,6 +144,9 @@ def verify(snapshot: Path, expected_sid: str | None=None, *, ledger: str='auto')
     Inside a store (ledger beside the directory) the manifest must also be the ledger's published one; ledger='skip'
     is content-only and ledger='require' refuses anything not ledgered."""
     if ledger not in ('auto','require','skip'): raise ValueError('ledger mode must be auto, require or skip')
+    expected_sid,ledger=_store_read(snapshot,expected_sid,ledger)
+    if ledger!='skip': locate_entry(snapshot)   # refuse a symlinked/escaping store entry before hashing it
+    if not os.path.lexists(Path(snapshot)/'manifest.json') and lexical_store_entry(snapshot): raise_missing(snapshot)
     manifest=json.loads((snapshot/'manifest.json').read_text())
     if manifest.get('schema_version') not in {'1',SCHEMA_VERSION}:
         raise ValueError('unsupported schema version; explicit migration required')
@@ -164,6 +200,23 @@ def verify(snapshot: Path, expected_sid: str | None=None, *, ledger: str='auto')
     return manifest
 
 
+def lexical_store_entry(snapshot) -> bool:
+    from .publication import is_store_folder
+    return isinstance(snapshot,StoreEntry) or is_store_folder(os.path.dirname(os.path.abspath(snapshot)))
+
+
+def raise_missing(snapshot) -> None:
+    """A store read of an absent entry (or an entry without manifest.json) raises a typed PublicationError naming the
+    ledger state (reserved, published-missing, abandoned, not-found). Outside a store it stays FileNotFoundError."""
+    lex=Path(os.path.abspath(snapshot))
+    if lexical_store_entry(snapshot):
+        folder=Path(os.path.realpath(lex.parent))
+        try: err=missing_entry(Ledger(folder),lex.name,lex)
+        except (ValueError,OSError) as exc: err=PublicationError(f'{lex} is absent and its ledger could not be read ({exc})','not-found')
+        raise err
+    raise FileNotFoundError(f'{Path(snapshot)/"manifest.json"} does not exist')
+
+
 def import_source(source: str, path: Path, config: Config, namespace: str | None=None, record_id: str | None=None, source_url: str | None=None, dry_run: bool=False, projections: ProjectionConfig=ProjectionConfig()) -> dict:
     projections.validate()
     projection_spec={'revision':REVISION,'config':asdict(projections)}
@@ -192,7 +245,7 @@ def materialize(config: Config, sid: str, data: bytes, load, projections: Projec
     dest.parent.mkdir(parents=True,exist_ok=True)
     with build_lock(dest.parent,sid):
         # Another cooperating writer may have published this ID while we waited: reuse, never build twice.
-        if (existing:=existing_snapshot(config,sid)): return dict(existing,raced=True)
+        if (existing:=existing_snapshot(config,sid,locked=True)): return dict(existing,raced=True)
         return _materialize(config,sid,data,load,projections,projection_spec,meta,extra_files,memory,dest)
 
 
@@ -244,20 +297,6 @@ def _materialize(config, sid, data, load, projections, projection_spec, meta, ex
         raise
 
 
-def build_lock(folder: Path, sid: str):
-    """Per-ID exclusive build lock so concurrent writers of one ID build it once (the loser reuses the result)."""
-    from contextlib import contextmanager
-    import fcntl
-    @contextmanager
-    def held():
-        locks=folder/'.locks'; locks.mkdir(exist_ok=True)
-        with (locks/(sid.replace(':','-')+'.lock')).open('a') as handle:
-            fcntl.flock(handle,fcntl.LOCK_EX)
-            try: yield
-            finally: fcntl.flock(handle,fcntl.LOCK_UN)
-    return held()
-
-
 def discard_owned_stage(config: Config, stage: Path, sid: str, exc: BaseException | None) -> None:
     """Remove only the stage this call created. Never raises: a cleanup failure is attached to the original exception
     and written as a recovery receipt. A stage named by an open reservation is kept for explicit recovery."""
@@ -291,16 +330,18 @@ def discard_owned_stage(config: Config, stage: Path, sid: str, exc: BaseExceptio
 CORPUS_PROJECTIONS = ProjectionConfig(max_positions=2_000_000, max_rows=20_000_000)
 
 
-def import_cohort(cohort_dir: Path, config: Config, projections: ProjectionConfig=CORPUS_PROJECTIONS, namespace: str='ebl', parent_path: Path | None=None, batch: int=200, memory: str='1GB', max_payload_bytes: int=512*MiB) -> dict:
+def import_cohort(cohort_dir: Path, config: Config, projections: ProjectionConfig=CORPUS_PROJECTIONS, namespace: str='ebl', parent_path: Path | None=None, batch: int=200, memory: str='1GB', max_payload_bytes: int=512*MiB, cohort_ledger: str='auto') -> dict:
     """Chunked import of a verified cohort: records stream one at a time; rows spool per batch.
 
     Snapshot raw = cohort payload (exact parent slices). cohort.json is copied in and bound by hash, so the
     snapshot stays relocatable and traceable to parent byte ranges without using the 2 MiB small-input path.
+    The cohort must pass its publication check (``cohort_ledger``, see corpus.verify_cohort): an uncommitted,
+    abandoned or unrecorded cohort in a ledgered cohort store is refused before anything is built.
     """
     from .corpus import verify_cohort, iter_array
     from .adapters import ingest_record
     projections.validate()
-    cohort=verify_cohort(cohort_dir,parent_path)
+    cohort=verify_cohort(cohort_dir,parent_path,ledger=cohort_ledger)
     payload_path=cohort_dir/'payload.json'
     if payload_path.stat().st_size>max_payload_bytes: raise ValueError('cohort payload exceeds corpus import cap')
     data=payload_path.read_bytes()
@@ -386,16 +427,18 @@ def valid_sid(sid: str) -> str:
 
 
 def resolve_snapshot(config: Config, sid: str) -> Path:
-    """Store read: content-verified AND the ledger's published manifest. Unledgered or mismatched copies are refused."""
-    result=config.root/'snapshots'/valid_sid(sid)
+    """Store read: content-verified AND the ledger's published manifest. Unledgered, symlinked, misplaced or mismatched
+    entries are refused. Returns a StoreEntry, so later reads of it stay ledger-required and bound to this ID."""
+    result=store_entry(config,sid)
     verify(result,sid,ledger='require')
     return result
 
 
 def store_path(config: Config, sid: str) -> Path:
-    """Store location for a read that verifies itself (persisted/query functions call verify(), which is ledger-checked
-    in a store). Requires the store ledger so the read cannot silently fall back to the standalone label."""
-    result=config.root/'snapshots'/valid_sid(sid)
+    """Store location for a read that verifies itself (persisted/query functions call verify()). The StoreEntry makes
+    every such read ledger='require' with expected_sid=sid: a symlinked, unledgered or other-ID entry is refused and can
+    never be served with the standalone label."""
+    result=store_entry(config,sid)
     if not os.path.exists(result.parent/LEDGER): raise PublicationError(f'store {result.parent} has no publication ledger; refusing','not-in-ledger')
     return result
 
@@ -404,13 +447,19 @@ def store_ledger(config: Config) -> Ledger:
     return Ledger(config.root/'snapshots')
 
 
-def existing_snapshot(config: Config, sid: str) -> dict | None:
-    """Writer-side decision before building: a reusable published snapshot, None (free to build), or a refusal."""
+def existing_snapshot(config: Config, sid: str, *, locked: bool=False) -> dict | None:
+    """Writer-side decision before building: a reusable published snapshot, None (free to build), or a refusal.
+
+    An open reservation may be another live writer between reserve and commit (it holds the per-ID build lock for the
+    whole build). Unless the caller already holds that lock, wait for it and decide again: a live writer's result is
+    reused, and only a reservation with no live writer (an interruption) is refused."""
     from .publication import refusal
     dest=config.root/'snapshots'/sid
     st=store_ledger(config).status(sid)
-    if st.state in ('unpublished','aborted') and not dest.exists(): return None
-    if st.state=='published' and dest.exists(): return {'snapshot':sid,'reused':True,'manifest':verify(dest,sid,ledger='require')}
+    if st.state=='reserved' and not locked:
+        with build_lock(dest.parent,sid): return existing_snapshot(config,sid,locked=True)
+    if st.state in ('unpublished','aborted') and not os.path.lexists(dest): return None
+    if st.state=='published' and os.path.lexists(dest): return {'snapshot':sid,'reused':True,'manifest':verify(dest,sid,ledger='require')}
     if st.state in ('unpublished','aborted'):
         raise PublicationError(f'{dest} exists but {sid} has no publication record (for example, an interrupted pre-ledger-2 publish). '
                                f'Refusing to reuse or replace it. If it is the intended bytes run `python -m cuneiform publication-adopt {sid} --reason ...`; otherwise move it aside.','unledgered')

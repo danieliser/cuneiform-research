@@ -43,12 +43,17 @@ FORMAT = 2
 # Fault injection for crash tests only: CUNEIFORM_TEST_KILL_AT=<point> hard-exits the process at that point
 # (no except/finally handlers run). FAULT_HOOK lets in-process tests raise at a point instead.
 KILL_ENV = 'CUNEIFORM_TEST_KILL_AT'
+PAUSE_ENV = 'CUNEIFORM_TEST_PAUSE_AT'   # '<point>:<seconds>': sleep there (concurrency tests hold a writer in a window)
 FAULT_HOOK = None
 
 
 def fault(point: str) -> None:
     if os.environ.get(KILL_ENV) == point:
         os._exit(137)
+    pause = os.environ.get(PAUSE_ENV, '')
+    if pause.partition(':')[0] == point:
+        import time
+        time.sleep(float(pause.partition(':')[2] or 0))
     if FAULT_HOOK is not None:
         FAULT_HOOK(point)
 
@@ -88,15 +93,84 @@ def fsync_dir(path: Path) -> None:
 
 
 def seal(stage: Path) -> None:
-    """fsync every file and directory of a complete stage, then make it read-only (files 0444, dirs 0555)."""
-    paths = sorted(stage.rglob('*'), reverse=True)
+    """Make a complete stage read-only (files 0444, dirs 0555), then fsync every file and directory, so the contents
+    and the final modes are both flushed before the reservation (whose F_FULLFSYNC is the barrier on macOS)."""
+    paths = sorted(stage.rglob('*'), reverse=True)   # deepest first: children before their directory
+    for p in paths:
+        if p.is_symlink(): raise PublicationError(f'stage {stage} contains a symlink ({p.relative_to(stage)}); refusing to publish it', 'symlinked-entry')
     for p in paths:
         if p.is_file():
+            os.chmod(p, 0o444)
             with p.open('rb') as handle: os.fsync(handle.fileno())
     for p in [*paths, stage]:
-        if p.is_dir(): fsync_dir(p)
-    for p in paths: os.chmod(p, 0o444 if p.is_file() else 0o555)
-    os.chmod(stage, 0o555)
+        if p.is_dir():
+            os.chmod(p, 0o555); fsync_dir(p)
+
+
+def is_store_folder(folder) -> bool:
+    """A folder holding a publication ledger or lock is a store: every directory directly inside it is ledger-checked."""
+    return os.path.exists(os.path.join(folder, LEDGER)) or os.path.exists(os.path.join(folder, LOCK))
+
+
+def locate_entry(path) -> tuple[Path, str] | None:
+    """(store folder, entry name) for a directory read, or None for a copy outside any store.
+
+    Store membership is decided from the lexical parent AND the resolved parent, so a store entry can never become a
+    standalone copy by being a symlink, and a path outside a store that resolves into one is still ledger-checked.
+    A lexical store entry must be a real directory that resolves to <store>/<name>: a symlinked entry, or a path that
+    escapes through a symlinked component or '..', is refused."""
+    lex = Path(os.path.abspath(path)); real = Path(os.path.realpath(path))
+    if is_store_folder(lex.parent):
+        folder = Path(os.path.realpath(lex.parent))
+        if os.path.islink(lex) or os.path.islink(path) or real != folder/lex.name:
+            raise PublicationError(f'store entry {lex} is a symlink or resolves outside its store ({real}); store entries must be real '
+                                   'directories inside the store. Refusing. Move the link aside; to use a relocated copy, read it at its own '
+                                   'path (standalone, not ledger-checked) or adopt a real copy into a store explicitly.', 'symlinked-entry')
+        return folder, lex.name
+    if is_store_folder(real.parent):
+        return real.parent, real.name
+    return None
+
+
+def assert_no_symlinks(entry: Path, names) -> None:
+    """Refuse a store entry whose payload paths (or any directory on the way to them) are symlinks."""
+    for name in names:
+        p = entry
+        for part in Path(name).parts:
+            p = p/part
+            if p.is_symlink():
+                raise PublicationError(f'store entry {entry} has a symlink at {p.relative_to(entry)}; store payloads must be real files. Refusing.', 'symlinked-entry')
+
+
+def build_lock(folder: Path, ident: str):
+    """Per-ID exclusive build lock (<folder>/.locks/<id>.lock). Writers of one ID build it once; the loser reuses the
+    result. Recovery takes it too, so a writer never sees another live process's reserve->commit window as an
+    interruption. Lock order everywhere: build lock, then the ledger lock."""
+    @contextmanager
+    def held():
+        locks = Path(folder)/'.locks'; locks.mkdir(parents=True, exist_ok=True)
+        with (locks/(ident.replace(':', '-') + '.lock')).open('a') as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try: yield
+            finally: fcntl.flock(handle, fcntl.LOCK_UN)
+    return held()
+
+
+def missing_entry(ledger: 'Ledger', ident: str, dest: Path) -> 'PublicationError':
+    """Typed refusal for a store entry whose directory (or manifest) is absent, naming its ledger state."""
+    try: st = ledger.status(ident)
+    except PublicationError as exc: return exc
+    if st.state in ('published', 'reserved', 'abandoned', 'conflict'):
+        err = refusal(st, dest, ledger.label)
+        if st.state == 'reserved':
+            err.add_note(f'{dest} is absent; see `{recover_hint(ledger, ident)}`')
+        return err
+    return PublicationError(f'{ledger.label} {ident} is not in the store {ledger.folder} (ledger state {st.state}; no directory {dest.name})', 'not-found')
+
+
+def recover_hint(ledger: 'Ledger', ident: str, action: str = '') -> str:
+    store = '' if ledger.label == 'snapshot' else f' --store {ledger.label}s'
+    return f'python -m cuneiform publication-recover {ident}{store}' + (f' --action {action} --reason ...' if action else '')
 
 
 def file_digest(path: Path) -> str:
@@ -260,9 +334,10 @@ def refusal(st: Status, dest: Path, label: str = 'snapshot') -> PublicationError
                                 f'from {dest.parent}. Restore the exact published bytes from a copy you trust (a restored copy is served '
                                 'only if its manifest matches the ledger), or leave it missing. Never rebuild under the same ID.', 'published-missing')
     if st.state == 'reserved':
-        return PublicationError(f'publication of {sid} was reserved but never committed (interrupted, or in progress). The ID cannot be '
-                                f'rebuilt. Inspect with `python -m cuneiform publication-status {sid}` and resolve with '
-                                f'`python -m cuneiform publication-recover {sid} --action ...`.', 'reserved')
+        store = '' if label == 'snapshot' else f' --store {label}s'
+        return PublicationError(f'publication of {label} {sid} was reserved but never committed (interrupted: no live writer holds its build lock). '
+                                f'The ID cannot be rebuilt or read. Inspect with `python -m cuneiform publication-status {sid}{store}` and '
+                                f'resolve with `python -m cuneiform publication-recover {sid}{store} --action ... --reason ...`.', 'reserved')
     if st.state == 'abandoned':
         return PublicationError(f'{sid} was reserved and its bytes were lost before commit; the ID is burned permanently. '
                                 'A rebuild needs a new identity (revise the contract or inputs).', 'abandoned')
@@ -277,12 +352,12 @@ def publish_dir(ledger: Ledger, stage: Path, dest: Path, sid: str, manifest_sha2
     with ledger.locked():
         st = ledger.status(sid, ledger.writer_scan())
         if st.state == 'published':
-            if dest.exists() and matches(dest): return 'raced'
-            if dest.exists():
+            if os.path.lexists(dest) and matches(dest): return 'raced'
+            if os.path.lexists(dest):
                 raise PublicationError(f'{sid} is published but the directory in the store does not match the ledger; refusing', 'ledger-mismatch')
             raise refusal(st, dest, ledger.label)
         if st.state not in ('unpublished', 'aborted'): raise refusal(st, dest, ledger.label)
-        if dest.exists():
+        if os.path.lexists(dest):
             raise PublicationError(f'{dest} exists but {sid} has no publication record. Refusing to replace or reuse it. If it is the '
                                    f'intended bytes, run `python -m cuneiform publication-adopt {sid} --reason ...`; otherwise move it aside.', 'unledgered')
         fault('before-reserve')
@@ -294,7 +369,7 @@ def publish_dir(ledger: Ledger, stage: Path, dest: Path, sid: str, manifest_sha2
             os.rename(stage, dest)
         except BaseException as exc:
             # POSIX rename is atomic: with the stage still present and no destination, nothing became visible.
-            if stage.exists() and not dest.exists():
+            if stage.exists() and not os.path.lexists(dest):
                 try:
                     ledger.append({'event': 'abort', ledger.key: sid, 'manifest_sha256': manifest_sha256, 'stage': stage.name,
                                    'reason': f'{type(exc).__name__}: {exc}'[:500], 'aborted_at': now(), 'writer': writer()})
@@ -326,7 +401,10 @@ def inspect_reservation(ledger: Ledger, sid: str, folder: Path, check) -> dict:
     dest = folder/ledger.dirname(sid)
     stage = folder/st.stage if st.stage else None
     def observe(path):
-        if path is None or not path.exists(): return {'present': False}
+        if path is None or not os.path.lexists(path): return {'present': False}
+        if path.is_symlink() or any(q.is_symlink() for q in path.rglob('*')):
+            return {'present': True, 'symlink': True, 'content_verified': False, 'matches_reservation': False,
+                    'error': f'{path.name} is or contains a symlink; only a real directory of real files can be recovered'}
         try:
             m = check(path, sid)
             fsha = file_digest(path/'manifest.json') if (path/'manifest.json').exists() else None
@@ -350,9 +428,10 @@ def inspect_reservation(ledger: Ledger, sid: str, folder: Path, check) -> dict:
 
 def recover(ledger: Ledger, sid: str, folder: Path, action: str, check, reason: str) -> dict:
     if action not in ('commit', 'complete', 'discard', 'abandon'): raise PublicationError('unknown recovery action', 'error')
-    with ledger.locked():
+    with build_lock(folder, sid), ledger.locked():
         ledger.writer_scan()
-        # Holding the lock: no writer is between reserve and commit, so an open reservation is an interruption.
+        # Holding the build and ledger locks: no cooperating writer is between reserve and commit, so an open reservation
+        # is an interruption.
         plan = inspect_reservation(ledger, sid, folder, check)
         if plan['state'] != 'reserved':
             raise PublicationError(f'{sid} has no open reservation (state {plan["state"]}); nothing to recover', plan['state'])
@@ -378,7 +457,9 @@ def adopt(ledger: Ledger, sid: str, folder: Path, check, reason: str) -> dict:
     with ledger.locked():
         st = ledger.status(sid, ledger.writer_scan())
         if st.state != 'unpublished': raise PublicationError(f'{sid} already has ledger state {st.state}; adoption is only for unrecorded directories', st.state)
+        if dest.is_symlink(): raise PublicationError(f'{dest} is a symlink; only a real directory inside the store can be adopted', 'symlinked-entry')
         if not dest.is_dir(): raise PublicationError(f'{dest} does not exist; nothing to adopt', 'missing')
+        if any(q.is_symlink() for q in dest.rglob('*')): raise PublicationError(f'{dest} contains symlinks; only real files can be adopted', 'symlinked-entry')
         manifest = check(dest, sid)
         return ledger.append({'event': 'adopt', ledger.key: sid, 'manifest_sha256': manifest['manifest_sha256'],
                               'manifest_file_sha256': file_digest(dest/'manifest.json'), 'adopted_at': now(), 'reason': reason,
@@ -403,12 +484,14 @@ def check_published(ledger: Ledger, sid: str, manifest: dict, manifest_path: Pat
     entries, tail = ledger.scan()
     st = ledger.status(sid, entries)
     if st.state != 'published':
+        store = '' if ledger.label == 'snapshot' else f' --store {ledger.label}s'
         if st.state == 'unpublished':
-            raise PublicationError(f'{sid} is in a ledgered store ({ledger.folder}) but has no publication record; refusing to serve it. '
-                                   f'Adopt it explicitly (`python -m cuneiform publication-adopt {sid}`) or move it out of the store.', 'not-in-ledger')
+            raise PublicationError(f'{ledger.label} {sid} is in a ledgered store ({ledger.folder}) but has no publication record; refusing to serve it. '
+                                   f'Adopt it explicitly (`python -m cuneiform publication-adopt {sid}{store} --reason ...`) or move it out of the store.', 'not-in-ledger')
         if st.state == 'reserved':
-            raise PublicationError(f'{sid} publication is not committed (in progress or interrupted); refusing to serve it. '
-                                   f'See `python -m cuneiform publication-status {sid}`.', 'reserved')
+            raise PublicationError(f'{ledger.label} {sid} publication is not committed (in progress or interrupted); refusing to serve it. '
+                                   f'Inspect with `python -m cuneiform publication-status {sid}{store}`; resolve an interruption with '
+                                   f'`python -m cuneiform publication-recover {sid}{store} --action ... --reason ...`.', 'reserved')
         raise refusal(st, manifest_path.parent, ledger.label)
     if manifest.get('manifest_sha256') != st.manifest_sha256:
         raise PublicationError(f'{sid}: served manifest_sha256 {manifest.get("manifest_sha256")} differs from the published '

@@ -11,6 +11,7 @@ from pathlib import Path
 import codecs
 import hashlib
 import json
+import os
 import re
 from typing import Any, Iterator
 from .adapters import Builder, ingest_record
@@ -245,23 +246,51 @@ def cohort_identity(parent: dict, rule: dict, size: int) -> str:
     return identity('cohort', COHORT_FORMAT, SELECTOR, PARSER_VERSION, parent['sha256'], rule, size)
 
 
+COHORT_STANDALONE = {'status': 'standalone-not-ledger-checked', 'ledger_checked': False,
+                     'note': 'cohort content verified only; this directory is not inside a cohort store (no ledger or lock beside it)'}
+COHORT_PRE_LEDGER = {'status': 'unledgered-pre-ledger-cohort-store', 'ledger_checked': False,
+                     'note': 'this cohort store has neither a cohort ledger nor a lock: its cohorts predate the cohort ledger (review v0.1 F9). '
+                             'Content verified only, not ledger-bound. Ledger-bind one explicitly with '
+                             '`python -m cuneiform publication-adopt <cohort_id> --store cohorts --reason ...`.'}
+
+
+def cohort_dirname(cohort_id: str) -> str:
+    return cohort_id.replace(':', '-')
+
+
+def cohort_ledger(folder: Path):
+    from .publication import Ledger
+    return Ledger(folder, key='cohort_id', label='cohort', dirname=cohort_dirname)
+
+
+def valid_cid(cohort_id: str) -> str:
+    if not re.fullmatch(r'cohort:[0-9a-f]{32}', cohort_id): raise ValueError('invalid cohort ID')
+    return cohort_id
+
+
 def build_cohort(path: Path, parent: dict, size: int | None, out_root: Path, rule: dict = RULE_DEFAULT) -> dict:
     """Write an immutable cohort directory (manifest.json + payload.json). Existing cohorts are verified, never rewritten.
 
-    size=None selects every eligible record (used with an explicit key filter)."""
-    from .publication import Ledger, PublicationError, discard_stage, file_digest, publish_dir, refusal, seal
-    import uuid
+    size=None selects every eligible record (used with an explicit key filter). The whole decision and build run under
+    the per-ID build lock, so concurrent builders of one cohort build it once and the others reuse it."""
+    from .publication import build_lock, refusal
     cid = cohort_identity(parent, rule, size)
-    target = out_root/cid.replace(':', '-')
-    ledger = Ledger(out_root, key='cohort_id', label='cohort', dirname=lambda c: c.replace(':', '-'))
-    st = ledger.status(cid)
-    if target.exists():
-        if st.state == 'published':
-            if verify_cohort(target, path)['manifest_sha256'] != st.manifest_sha256: raise PublicationError(f'{cid}: cohort manifest differs from its ledger record; refusing', 'ledger-mismatch')
-        elif st.state != 'unpublished': raise refusal(st, target, 'cohort')
-        # unpublished + present: a cohort written before the cohort ledger existed; verified, not ledger-bound.
-        return verify_cohort(target, path)
-    if st.state not in ('unpublished', 'aborted'): raise refusal(st, target, 'cohort')
+    target = out_root/cohort_dirname(cid)
+    ledger = cohort_ledger(out_root)
+    with build_lock(out_root, cid):
+        if os.path.lexists(target):
+            # Published: served only if it equals the ledger record. Reserved, abandoned, conflicting, symlinked, or
+            # unrecorded in a ledgered store: refused. In a store that predates the cohort ledger: verified and labelled.
+            return verify_cohort(target, path, ledger='store')
+        st = ledger.status(cid)
+        if st.state not in ('unpublished', 'aborted'): raise refusal(st, target, 'cohort')
+        _build_cohort(path, parent, size, rule, cid, out_root, target, ledger)
+    return verify_cohort(target, path, ledger='require')
+
+
+def _build_cohort(path, parent, size, rule, cid, out_root, target, ledger) -> None:
+    from .publication import discard_stage, file_digest, publish_dir, seal
+    import uuid
     picked = select(path, parent, size, rule)
     if size is not None and len(picked['chosen']) < size: raise ValueError(f'source supports only {len(picked["chosen"])} records under rule; requested {size}')
     stage = out_root/('.pending-' + uuid.uuid4().hex)
@@ -293,7 +322,7 @@ def build_cohort(path: Path, parent: dict, size: int | None, out_root: Path, rul
         (stage/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + '\n')
         seal(stage)
         def matches(d):
-            try: return verify_cohort(d)['manifest_sha256'] == manifest['manifest_sha256']
+            try: return verify_cohort(d, ledger='require')['manifest_sha256'] == manifest['manifest_sha256']
             except (ValueError, OSError, KeyError): return False
         if publish_dir(ledger, stage, target, cid, manifest['manifest_sha256'], file_digest(stage/'manifest.json'), matches) == 'raced':
             discard_stage(stage)
@@ -301,14 +330,81 @@ def build_cohort(path: Path, parent: dict, size: int | None, out_root: Path, rul
         try:
             st = ledger.status(cid)
             if not (st.state == 'reserved' and st.stage == stage.name): discard_stage(stage)
-            else: exc.add_note(f'stage {stage} is named by the open cohort reservation; kept for recovery')
+            else: exc.add_note(f'stage {stage} is named by the open cohort reservation; kept for '
+                               f'`python -m cuneiform publication-recover {cid} --store cohorts`')
         except BaseException as cleanup_exc:
             exc.add_note(f'cohort stage cleanup failed ({cleanup_exc!r}); {stage} remains')
         raise
-    return verify_cohort(target, path)
 
 
-def verify_cohort(directory: Path, parent_path: Path | None = None) -> dict:
+def verify_cohort(directory: Path, parent_path: Path | None = None, *, ledger: str = 'auto') -> dict:
+    """Content verification (manifest digest, identity, payload hash, every member slice and, when given, the parent
+    byte ranges) plus the cohort publication check. ``ledger``:
+
+      auto     ledger-checked when the directory (lexically or resolved) sits beside a cohort ledger or lock;
+               otherwise a standalone copy, labelled as such
+      store    the caller names a store entry (CLI cohort_path): like auto, but a store with no ledger and no lock is
+               labelled ``unledgered-pre-ledger-cohort-store`` (the F9 legacy cohorts), never ``standalone``
+      require  must be committed in a cohort ledger and equal to its record
+      skip     content only (recovery and adoption checks)
+
+    In a ledgered store, a reserved-but-uncommitted, aborted, abandoned, conflicting, unrecorded, misplaced or symlinked
+    cohort is refused with a typed PublicationError naming the recovery command."""
+    if ledger not in ('auto', 'store', 'require', 'skip'): raise ValueError('cohort ledger mode must be auto, store, require or skip')
+    from .publication import is_store_folder
+    if not os.path.lexists(Path(directory)/'manifest.json') and is_store_folder(os.path.dirname(os.path.abspath(directory))): raise_missing_cohort(directory)
+    if ledger != 'skip':
+        from .publication import locate_entry
+        locate_entry(directory)   # refuse a symlinked/escaping store entry before hashing it
+    manifest = _verify_cohort_content(directory, parent_path)
+    return dict(manifest, publication=cohort_publication(directory, manifest, ledger))
+
+
+def cohort_publication(directory: Path, manifest: dict, mode: str) -> dict:
+    from .publication import LEDGER, PublicationError, assert_no_symlinks, check_published, locate_entry
+    if mode == 'skip': return dict(COHORT_STANDALONE)
+    entry = locate_entry(directory)
+    if entry is None:
+        if mode == 'require':
+            raise PublicationError(f'{directory} is not inside a cohort store with a ledger; this read requires the cohort ledger', 'not-in-ledger')
+        return dict(COHORT_PRE_LEDGER if mode == 'store' else COHORT_STANDALONE)
+    folder, name = entry
+    cid = manifest['cohort_id']
+    if name != cohort_dirname(cid):
+        raise PublicationError(f'cohort store directory {name} holds the manifest of {cid}; refusing', 'misplaced')
+    if not os.path.exists(folder/LEDGER):
+        raise PublicationError(f'{cid}: cohort store {folder} has a publication lock but no ledger; refusing to serve unledgered cohorts', 'not-in-ledger')
+    assert_no_symlinks(folder/name, ['manifest.json', 'payload.json'])
+    return check_published(cohort_ledger(folder), cid, manifest, folder/name/'manifest.json')
+
+
+def raise_missing_cohort(directory: Path) -> None:
+    """Typed refusal for an absent cohort store entry (reserved, published-missing, abandoned, not-found)."""
+    from .publication import PublicationError, is_store_folder, missing_entry
+    lex = Path(os.path.abspath(directory))
+    if is_store_folder(lex.parent):
+        cid = lex.name.replace('-', ':', 1)
+        try: err = missing_entry(cohort_ledger(Path(os.path.realpath(lex.parent))), cid, lex)
+        except (ValueError, OSError) as exc: err = PublicationError(f'{lex} is absent and its cohort ledger could not be read ({exc})', 'not-found')
+        raise err
+    raise FileNotFoundError(f'{Path(directory)/"manifest.json"} does not exist')
+
+
+def cohort_check(root: Path):
+    """Content check used by cohort recovery and adoption: identity must equal the requested ID, and member slices are
+    compared with the receipt-bound parent raw object when it is present under ``root``."""
+    from .acquire import raw_path
+    def check(path: Path, cid: str) -> dict:
+        declared = json.loads((path/'manifest.json').read_text())
+        parent = raw_path(root, declared['parent']['sha256'])
+        m = _verify_cohort_content(path, parent if parent.exists() else None)
+        # Identity comes from the manifest; the location (stage or <folder>/<dirname>) is chosen by the recovery code.
+        if m['cohort_id'] != cid: raise ValueError(f'cohort identity mismatch: {path.name} holds {m["cohort_id"]}, expected {cid}')
+        return m
+    return check
+
+
+def _verify_cohort_content(directory: Path, parent_path: Path | None = None) -> dict:
     """Check manifest digest, payload hash, every member slice, and (when available) the parent byte ranges."""
     manifest = json.loads((directory/'manifest.json').read_text())
     body = {k: v for k, v in manifest.items() if k != 'manifest_sha256'}
@@ -362,8 +458,7 @@ def inspect_parent(root: Path, receipt_id: str) -> dict:
 
 
 def cohort_path(root: Path, cohort_id: str) -> Path:
-    if not re.fullmatch(r'cohort:[0-9a-f]{32}', cohort_id): raise ValueError('invalid cohort ID')
-    return root/'derived'/'cohorts'/cohort_id.replace(':', '-')
+    return root/'derived'/'cohorts'/cohort_dirname(valid_cid(cohort_id))
 
 
 def select_cohort(root: Path, receipt_id: str, size: int | None, rule: dict = RULE_DEFAULT) -> dict:
@@ -397,7 +492,7 @@ def audit(manifest: dict) -> dict:
         for f in ('atf_kinds', 'signs_kinds'):
             for k, v in r[f].items(): totals[f'{f[:-6]}:{k}'] += v
         totals['translation_segments'] += r['translations']['segments']
-    return {'cohort_id': manifest['cohort_id'], 'parent_sha256': manifest['parent']['sha256'], 'size': n, 'rule': manifest['rule'],
+    return {'cohort_id': manifest['cohort_id'], 'publication': manifest.get('publication'), 'parent_sha256': manifest['parent']['sha256'], 'size': n, 'rule': manifest['rule'],
             'parent_records': manifest['parent_records'], 'eligible_records': manifest['eligible_records'], 'excluded_by_reason': manifest['excluded_by_reason'],
             'field_coverage': {'cdli_number': frac(lambda r: r['cdli']), 'period': frac(lambda r: r['period'] not in (None, 'None')), 'genre': frac(lambda r: r['genre']),
                                'publication': frac(lambda r: r['publication_present']), 'oracc_project_field': frac(lambda r: r['oracc_project_field']),

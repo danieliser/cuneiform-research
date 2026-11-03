@@ -36,6 +36,8 @@ def main() -> None:
     p=sub.add_parser('publication-adopt',help='explicitly ledger an existing snapshot directory that has no ledger record');p.add_argument('snapshot');p.add_argument('--reason',required=True)
     p=sub.add_parser('publication-repair-ledger',help='append-only acknowledgement of a torn final ledger record');p.add_argument('--reason',required=True)
     p=sub.add_parser('publication-clean-stage',help='remove one named leftover .pending-* stage that no reservation names');p.add_argument('stage');p.add_argument('--min-age-s',type=int,default=600)
+    for name in ('publication-status','publication-recover','publication-adopt','publication-repair-ledger','publication-clean-stage'):
+        sub.choices[name].add_argument('--store',choices=['snapshots','cohorts'],default='snapshots',help='which ledgered store: <root>/snapshots (default) or <root>/derived/cohorts')
     p=sub.add_parser('scope',help='population a snapshot describes (cohort size, eligible/parent denominators, parent receipt)');p.add_argument('snapshot')
     p=sub.add_parser('manifest');p.add_argument('snapshot')
     p=sub.add_parser('lookup',help='bounded organizations over a persisted snapshot');p.add_argument('snapshot');p.add_argument('organization',choices=ORGANIZATIONS);p.add_argument('value',nargs='?',default='');scope_args(p)
@@ -87,15 +89,16 @@ def dispatch(args, cfg):
         return {k:m[k] for k in ('cohort_id','directory','size','parent_records','eligible_records','excluded_by_reason','payload','rule','verified_parent_slices')}
     if c=='corpus-audit':
         from .corpus import audit, audit_markdown, cohort_path, verify_cohort
-        report=audit(verify_cohort(cohort_path(cfg.root,args.cohort)))
+        report=audit(verify_cohort(cohort_path(cfg.root,args.cohort),ledger='store'))
         return audit_markdown(report) if args.markdown else report
     if c=='corpus-import':
-        from .corpus import cohort_path
+        from .corpus import cohort_path, raise_missing_cohort
         from .acquire import raw_path
         from .storage import import_cohort
         directory=cohort_path(cfg.root,args.cohort)
+        if not os.path.lexists(directory/'manifest.json'): raise_missing_cohort(directory)
         parent=json.loads((directory/'manifest.json').read_text())['parent']
-        r=import_cohort(directory,cfg,parent_path=raw_path(cfg.root,parent['sha256']),batch=args.batch)
+        r=import_cohort(directory,cfg,parent_path=raw_path(cfg.root,parent['sha256']),batch=args.batch,cohort_ledger='store')
         m=r['manifest']
         return {'snapshot':r['snapshot'],'reused':r['reused'],'counts':m['counts'],'ingestion':m.get('ingestion'),'build_timings':m.get('build_timings'),'snapshot_payload_bytes':m.get('snapshot_payload_bytes')}
     if c=='snapshots':
@@ -147,32 +150,43 @@ def dispatch(args, cfg):
 def publication_command(args, cfg):
     import time
     from .publication import adopt, discard_stage, inspect_reservation, recover
-    from .storage import store_ledger, valid_sid, verify_content
-    ledger=store_ledger(cfg); folder=cfg.root/'snapshots'; c=args.command
+    c=args.command
+    if args.store=='cohorts':
+        # Same reserve/commit machinery, rooted at <root>/derived/cohorts with the cohort ledger (key cohort_id). The check
+        # content-verifies the cohort, requires its identity to equal the requested ID, and compares member slices with
+        # the receipt-bound parent raw object when it is present.
+        from .corpus import cohort_check, cohort_ledger, valid_cid
+        folder=cfg.root/'derived'/'cohorts'; ledger=cohort_ledger(folder); valid=valid_cid; check=cohort_check(cfg.root); pattern='cohort-*'
+    else:
+        from .storage import store_ledger, valid_sid, verify_content
+        folder=cfg.root/'snapshots'; ledger=store_ledger(cfg); valid=valid_sid; check=verify_content; pattern='snapshot:*'
     if c=='publication-status':
         entries,tail=ledger.scan()
-        ids=[valid_sid(args.snapshot)] if args.snapshot else ledger.ids()
+        ids=[valid(args.snapshot)] if args.snapshot else ledger.ids()
         states=[]
         for sid in ids:
             st=ledger.status(sid,entries)
-            states.append({'snapshot':sid,'state':st.state,'kind':st.kind,'manifest_sha256':st.manifest_sha256,'directory_present':(folder/sid).exists(),'reason':st.reason,
-                           **({'recovery':inspect_reservation(ledger,sid,folder,verify_content)} if st.state=='reserved' else {})})
-        known=set(ledger.ids())
-        unledgered=sorted(d.name for d in folder.glob('snapshot:*')) if folder.exists() else []
-        stages=[{'stage':d.name,'age_s':round(time.time()-d.stat().st_mtime),'named_by_reservation':any(ledger.status(i,entries).stage==d.name for i in known)} for d in sorted(folder.glob('.pending-*'))] if folder.exists() else []
-        return {'ledger':str(ledger.path),'ledger_exists':ledger.exists(),'torn_tail':tail,'snapshots':states,
-                'unledgered_directories':[n for n in unledgered if n not in known],'stages':stages,
+            states.append({'id':sid,'snapshot' if args.store=='snapshots' else 'cohort':sid,'state':st.state,'kind':st.kind,'manifest_sha256':st.manifest_sha256,
+                           'directory_present':os.path.lexists(folder/ledger.dirname(sid)),'reason':st.reason,
+                           **({'recovery':inspect_reservation(ledger,sid,folder,check)} if st.state=='reserved' else {})})
+        known={ledger.dirname(i) for i in ledger.ids()}
+        entries_on_disk=sorted(folder.glob(pattern)) if folder.exists() else []
+        ids_known=set(ledger.ids())
+        stages=[{'stage':d.name,'age_s':round(time.time()-d.stat().st_mtime),'named_by_reservation':any(ledger.status(i,entries).stage==d.name for i in ids_known)} for d in sorted(folder.glob('.pending-*'))] if folder.exists() else []
+        return {'store':args.store,'ledger':str(ledger.path),'ledger_exists':ledger.exists(),'torn_tail':tail,'snapshots' if args.store=='snapshots' else 'cohorts':states,
+                'unledgered_directories':[d.name for d in entries_on_disk if d.name not in known],
+                'symlinked_entries':[d.name for d in entries_on_disk if d.is_symlink()],'stages':stages,
                 'limits':'application-level protocol for cooperating writers; same-owner OS access and root can still alter files and the ledger'}
     if c=='publication-recover':
-        sid=valid_sid(args.snapshot)
-        if args.action=='inspect': return inspect_reservation(ledger,sid,folder,verify_content)
+        sid=valid(args.snapshot)
+        if args.action=='inspect': return inspect_reservation(ledger,sid,folder,check)
         if not args.reason: raise ValueError('--reason is required for a recovery action')
-        return recover(ledger,sid,folder,args.action,verify_content,args.reason)
-    if c=='publication-adopt': return adopt(ledger,valid_sid(args.snapshot),folder,verify_content,args.reason)
+        return recover(ledger,sid,folder,args.action,check,args.reason)
+    if c=='publication-adopt': return adopt(ledger,valid(args.snapshot),folder,check,args.reason)
     if c=='publication-repair-ledger': return ledger.repair_tail(args.reason)
     if c=='publication-clean-stage':
         name=args.stage
-        if not name.startswith('.pending-') or '/' in name: raise ValueError('only a .pending-* stage name inside the snapshot store is accepted')
+        if not name.startswith('.pending-') or '/' in name: raise ValueError(f'only a .pending-* stage name inside the {args.store} store is accepted')
         stage=folder/name
         if not stage.is_dir(): raise ValueError(f'{stage} does not exist')
         with ledger.locked():
