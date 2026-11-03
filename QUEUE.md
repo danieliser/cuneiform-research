@@ -2,7 +2,7 @@
 
 The active work queue. Read it with [docs/MODEL-ATLAS.md](docs/MODEL-ATLAS.md) before any edit. The rules are in [AGENTS.md](AGENTS.md).
 
-- **Updated:** 2026-11-03 ~10:25Z by the atlas sync worker (Q-007/Q-018), which the parent made queue writer for this synchronization. Earlier the same day: the Q-003 atlas worker wrote the queue, and the Q-004 reviewer corrected status lines (see `reviews/atlas-review-v0.1.md`).
+- **Updated:** 2026-11-03 ~10:27Z by the atlas sync worker (Q-007/Q-018), which the parent made queue writer for this synchronization. Earlier the same day: the Q-003 atlas worker wrote the queue, and the Q-004 reviewer corrected status lines (see `reviews/atlas-review-v0.1.md`).
 - **Baseline:** commit `d6049e2` (schema `2`, parser `conservative-3`, projection `linked-1`, snapshot contract `manifest-3`). The atlas worker ran the in-memory suite on a clean export of `d6049e2`: 43 ran, OK, 5 disk tests skipped. The corpus worker reports all 43 passing with disk tests enabled (UNVERIFIED, not re-run here). Previous baseline `2ab620b`: the parent observed 31 tests passing with disk tests enabled (11.869s), which is historical evidence for that commit only.
 - **Queue writer:** one writer at a time. The parent grants it. Workers report claims, evidence and blockers in their task thread or handoff, and the queue writer copies them here with attribution. A worker may edit only its own task block, and only when the parent grants it queue ownership.
 - **Status words:** `TODO`, `READY`, `IN_PROGRESS`, `BLOCKED`, `IN_REVIEW`, `DONE`, `DEFERRED`. Add `UNVERIFIED` when a status came from someone else and nobody here has read it back.
@@ -17,18 +17,18 @@ The active work queue. Read it with [docs/MODEL-ATLAS.md](docs/MODEL-ATLAS.md) b
 | Q-001 | P0 | `IN_REVIEW` | Corpus implementation worker (delivered `d6049e2`, review pending) | [corpus task 64821742](t3-thread://v2/7121f9cd-51d1-4941-95dd-f191951535d5/thread:delegated-task:command%3Amcp%3Afbac0162-ea66-4328-897b-ed1aece634c3%3Adelegate-task%3A64821742-a8c5-4d12-a3e1-58f13dc925f0) | Q-000 |
 | Q-002 | P0 | `IN_PROGRESS` | UI worker, sibling `cuneiform-ui` (fix round active, UNVERIFIED) | [UI task 53dbd053](t3-thread://v2/7121f9cd-51d1-4941-95dd-f191951535d5/thread:delegated-task:command%3Amcp%3Afbac0162-ea66-4328-897b-ed1aece634c3%3Adelegate-task%3A53dbd053-4014-4ac7-9f7c-0089424cbbde); fixes by task b13b7efc | Q-000 |
 | Q-003 | P0 | `IN_REVIEW` | Model atlas, queue, agent workflow and drift checker | Atlas documentation worker, task 8d17b311; fixes in Q-018 | Q-000 |
-| Q-004 | P0 | `IN_REVIEW` | Independent review of Q-003 (dispositions recorded; commit pending) | Review sub-agent (not the Q-003 builder) | Q-003 |
-| Q-005 | P1 | `READY` | Independent review of the corpus worker's output, incl. publication safeguards | Unassigned reviewer (parent starts next) | Q-001 |
+| Q-004 | P0 | `DONE` | Independent review of Q-003 (dispositions recorded, committed `fd54419`) | Review sub-agent (not the Q-003 builder) | Q-003 |
+| Q-005 | P1 | `IN_PROGRESS` | Independent review of the corpus worker's output, incl. publication safeguards (UNVERIFIED) | Corpus reviewer (assigned by parent; not read back) | Q-001 |
 | Q-006 | P1 | `IN_REVIEW` | Independent review of the UI worker's output (findings reported, fixes pending, UNVERIFIED) | UI review task bc133950 | Q-002 |
-| Q-007 | P0 | `IN_REVIEW` | Sync the atlas to Q-001 changes and make a coordinated commit (commit pending) | Atlas sync worker (Q-018), granted by the parent | Q-001, Q-003 |
+| Q-007 | P0 | `DONE` | Sync the atlas to Q-001 changes and make a coordinated commit (`fd54419`) | Atlas sync worker (Q-018), granted by the parent | Q-001, Q-003 |
 | Q-008 | P1 | `TODO` | Corpus ↔ UI integration contract | Parent → assigned worker | Q-001, Q-002, Q-007 |
 | Q-009 | P2 | `TODO` | FalkorDB graph projection (isolated, local) | Unassigned | Q-007, Q-008 |
 | Q-010 | P2 | `TODO` | Initial MCP read slice | Unassigned | Q-007 |
 | Q-011 | P2 | `IN_REVIEW` | ORACC source contract audit, then Word/Lemma/Sense adapter (ccpo pilot delivered) | Corpus worker (Q-001); review in Q-005 | Q-000, Q-001 |
 | Q-012 | P2 | `IN_REVIEW` | eBL source-specific ingestion and 30-record feasibility audit (delivered) | Corpus worker (Q-001); review in Q-005 | Q-001 |
 | Q-013 | P2 | `IN_REVIEW` | CDLI current export, pinned revision and terms (catalog JSON for 51 records) | Corpus worker (Q-001); review in Q-005 | Q-000, Q-001 |
-| Q-014 | P1 | `IN_REVIEW` | Temporal model decisions TD-1 to TD-7 (accepted by parent; commit pending) | Parent; recorded by Q-018 | Q-003 |
-| Q-015 | P2 | `TODO` | Temporal implementation: raw date fields to attributed DateClaims | Unassigned | Q-014, Q-007 |
+| Q-014 | P1 | `DONE` | Temporal model decisions TD-1 to TD-7 (accepted by parent, recorded `fd54419`) | Parent; recorded by Q-018 | Q-003 |
+| Q-015 | P2 | `READY` | Temporal implementation: raw date fields to attributed DateClaims | Unassigned | Q-014, Q-007 |
 | Q-016 | P3 | `DEFERRED` | Images, regions, OCR and embeddings | — | Q-012 |
 | Q-017 | P2 | `TODO` | Hypothesis groups and alternative-aware bounds | Unassigned | Q-007 |
 | Q-018 | P0 | `IN_REVIEW` | Atlas review fixes (Q-004 F1–F11) and Q-007 sync implementation | Atlas review-fix and sync sub-agent | Q-004 |
@@ -79,7 +79,7 @@ The active work queue. Read it with [docs/MODEL-ATLAS.md](docs/MODEL-ATLAS.md) b
 
 ## Q-004 — Independent review of Q-003
 
-- **Status:** `IN_REVIEW`: every finding has a disposition below. The review file is committed with Q-007; the SHA is recorded after the commit.
+- **Status:** `DONE`: every finding has a disposition below; the review file and the fixes were committed in `fd54419`. Re-check of the fixes is Q-019.
 - **Priority:** P0
 - **Owner / thread:** Review sub-agent, not the Q-003 builder.
 - **Depends on:** Q-003
@@ -96,17 +96,17 @@ The active work queue. Read it with [docs/MODEL-ATLAS.md](docs/MODEL-ATLAS.md) b
   - **F9 accepted.** The parent owns TD-1 to TD-7 as routine conservative defaults (Q-014), with an explicit trigger for escalating to the user.
   - **F10 fixed.** `Spool.detached('<table>')` and `Spool('<table>')` count as literal writes.
   - **F11 partly fixed.** The checker now requires a backticked commit SHA in every `DONE` block. Limitation: a backticked hex task ID also satisfies it. AGENTS.md now says which rules are enforced only by documentation.
-- **Next step / blockers:** Record the commit SHA, then `DONE`.
+- **Next step / blockers:** None. Q-019 re-checks the fixes.
 
 ## Q-005 — Independent review of the corpus worker's output
 
-- **Status:** `READY`
+- **Status:** `IN_PROGRESS` (UNVERIFIED: an untracked `reviews/corpus-pilot-review-v0.1.md` appeared in this checkout at ~10:25Z; not read here, owner not read back).
 - **Priority:** P1
-- **Owner / thread:** Unassigned reviewer, not the corpus worker. The parent reports it starts next.
+- **Owner / thread:** Corpus reviewer assigned by the parent, not the corpus worker.
 - **Depends on:** Q-001
 - **Scope:** The `d6049e2` diff and its tests, including a re-run with disk tests enabled under the storage guard. The publication safeguards after the same-ID incident: ledger refusal after deletion, read-only trees, `manifest-3` identity, and the backfilled ledger rows. Rights statements: the ORACC CC0 statement is a code literal quoting the catalogue license field, and the CDLI terms text. Cohort determinism and representativeness claims. The atlas claims made by Q-007, especially the 30 `corpus` entries and the `disk (UNVERIFIED)` levels.
 - **Acceptance evidence:** A new review file under `reviews/` with findings and dispositions, and the suite re-run by the reviewer. When the disk run is read back, it is recorded in `verification_runs` with `read_back: true`.
-- **Next step / blockers:** Assign the reviewer.
+- **Next step / blockers:** Review handoff with its file list. The atlas worker did not stage or commit the review file.
 
 ## Q-006 — Independent review of the UI worker's output
 
@@ -120,13 +120,13 @@ The active work queue. Read it with [docs/MODEL-ATLAS.md](docs/MODEL-ATLAS.md) b
 
 ## Q-007 — Sync the atlas to Q-001 changes and make a coordinated commit
 
-- **Status:** `IN_REVIEW`: the sync is complete and checked; the SHA is recorded after the commit.
+- **Status:** `DONE`: committed in `fd54419`.
 - **Priority:** P0
 - **Owner / thread:** Atlas sync worker (Q-018), granted by the parent after Q-001 stopped writing at `d6049e2`.
 - **Depends on:** Q-001, Q-003
 - **Scope:** Atlas revision 2 at baseline `d6049e2`: `node:WordToken`, `node:Lemma`, `node:Sense`, `edge:HAS_WORD`, `edge:LEMMATIZED_AS` and `edge:HAS_SENSE` raised to code with qualification keys from code; new `edge:IN_SENSE`; 26 manifest keys, 4 optional per source; rights for `ebl-cohort`, plus per-snapshot rights for `oracc-selection` and `cdli-selection`; new `artifact:publication-ledger` (with the incident), `artifact:acquisition-receipt`, `artifact:cohort-manifest`, `artifact:selection-manifest` and `value:snapshot-scope`; `contract:portable-graph-export` implemented (no test, so verified none); `query:lookup`, `query:trace` and `interface:cli` updated; 30 entries raised to `corpus` with evidence from the three snapshots that were published once; verification runs recorded. The corpus worker's files were not edited.
-- **Acceptance evidence:** At `d6049e2`, with the code identical to HEAD: `python3 scripts/check_model_atlas.py` gives `model atlas: OK`; `<venv>/python -B scripts/check_model_atlas.py --runtime` gives `model atlas: OK (runtime population checked)`; `python3 scripts/check_model_atlas.py --self-test` gives 34/34; the in-memory suite gives 43 ran, OK, skipped=5. The secret scan result is recorded with the commit.
-- **Next step / blockers:** Commit, then record the SHA and set `DONE`.
+- **Acceptance evidence:** At `d6049e2`, with the code identical to HEAD: `python3 scripts/check_model_atlas.py` gives `model atlas: OK`; `<venv>/python -B scripts/check_model_atlas.py --runtime` gives `model atlas: OK (runtime population checked)`; `python3 scripts/check_model_atlas.py --self-test` gives 34/34; the in-memory suite gives 43 ran, OK, skipped=5. `gitleaks dir` over the eight committed files: no leaks found. Commit `fd54419` contains only atlas, checker, queue, AGENTS/CLAUDE and the Q-004 review file.
+- **Next step / blockers:** None. The atlas claims are part of the Q-005 and Q-019 reviews. Future contract changes follow AGENTS.md.
 
 ## Q-008 — Corpus ↔ UI integration contract
 
@@ -190,7 +190,7 @@ The active work queue. Read it with [docs/MODEL-ATLAS.md](docs/MODEL-ATLAS.md) b
 
 ## Q-014 — Temporal model decisions TD-1 to TD-7
 
-- **Status:** `IN_REVIEW`: accepted by the parent and recorded in the atlas; the SHA is recorded after the commit.
+- **Status:** `DONE`: accepted by the parent, recorded in the atlas and committed in `fd54419`.
 - **Priority:** P1
 - **Owner / thread:** Parent (routine engineering defaults); recorded by Q-018.
 - **Depends on:** Q-003
@@ -205,17 +205,17 @@ The active work queue. Read it with [docs/MODEL-ATLAS.md](docs/MODEL-ATLAS.md) b
   - TD-7: reuse the claim table with typed details. Competing datings stay separate, and no winner is chosen.
   - Escalate to the user if anyone proposes a default `node:ChronologyScheme`, a calendar-conversion authority, or a departure from these choices. Unresolved historical chronology stays source-qualified and is never guessed.
 - **Acceptance evidence:** Each `decision:` entry carries a `decision_record` and is `modeled: documented`. The value and claim shapes stay `proposed` and `implemented: none`. No temporal schema exists, and none is claimed.
-- **Next step / blockers:** Record the commit SHA, then `DONE`. Q-015 may start after that.
+- **Next step / blockers:** None. Q-015 may start.
 
 ## Q-015 — Temporal implementation: raw date fields to attributed DateClaims
 
-- **Status:** `TODO`
+- **Status:** `READY`
 - **Priority:** P2
 - **Owner / thread:** Unassigned.
 - **Depends on:** Q-014, Q-007
 - **Scope:** Turn the CDLI and eBL raw temporal fields (`facet:cdli-temporal-fields`, `facet:ebl-temporal-fields`) into source-attributed claims under the Q-014 decisions. Sentinels and ambiguous values stay raw. Competing datings stay separate claims.
 - **Acceptance evidence:** Tests for sentinels, open bounds such as `2015ff.`, `as-printed` approximate BC ranges, catalog period glosses, and competing claims. Atlas statuses and the runtime check are updated.
-- **Next step / blockers:** Q-014 and Q-007 commits.
+- **Next step / blockers:** Assign a worker. Q-014 and Q-007 landed in `fd54419`.
 
 ## Q-016 — Images, regions, OCR and embeddings
 
@@ -239,7 +239,7 @@ The active work queue. Read it with [docs/MODEL-ATLAS.md](docs/MODEL-ATLAS.md) b
 
 ## Q-018 — Atlas review fixes (Q-004 F1–F11) and Q-007 sync implementation
 
-- **Status:** `IN_REVIEW`: delivered; independent re-check is Q-019.
+- **Status:** `IN_REVIEW`: delivered in `fd54419`; independent re-check is Q-019.
 - **Priority:** P0
 - **Owner / thread:** Atlas review-fix and sync sub-agent, delegated by the parent (the worker cannot see its own task ID). Builder of these changes, so it does not review them.
 - **Depends on:** Q-004
