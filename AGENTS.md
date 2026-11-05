@@ -53,5 +53,5 @@ python3 scripts/check_model_atlas.py            # must print "model atlas: OK"
 - Published snapshot IDs are permanent. Never delete and rebuild a published snapshot under the same ID; a revision gets a new ID (see `artifact:publication-ledger`).
 - Record dependencies and blockers in the task block (`Depends on`, `Next step / blockers`). A blocked dependency blocks the task.
 - Ship work by commit only. Do not commit while another worker is writing to git or the index. Hand the parent an exact list of owned files.
-- Run tests with `/Users/danieliser/.local/share/cuneiform-research/venv/bin/python -B -m unittest discover -s tests`. Disk tests need `CUNEIFORM_RUN_DISK_TESTS=1` and admission under the storage guard.
+- Run tests with `/Users/danieliser/.local/share/cuneiform-research/venv/bin/python -B -m unittest discover -s tests`. Disk tests need `CUNEIFORM_RUN_DISK_TESTS=1` and admission under the storage guard. For this full-corpus runtime, also set `CUNEIFORM_TEST_MAX_TOTAL_GIB=41` (the authorized test budget); otherwise the default 5 GiB cap refuses admission.
 - Do not download data, install dependencies or do image work unless the task explicitly authorizes it.

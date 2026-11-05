@@ -665,8 +665,8 @@
         "Q-005"
       ],
       "verified_by": [
-        "q023-writer-disk-057a0b7",
-        "q023-writer-inmemory-057a0b7",
+        "q023-reviewer-disk-057a0b7",
+        "q023-reviewer-inmemory-057a0b7",
         "review-v03-disk-63f4221",
         "q021-disk-63f4221",
         "backend-q022-disk-63f4221",
@@ -720,8 +720,8 @@
       "coverage": "Seven rows at 63f4221 (read by the atlas worker; ledger SHA-256 6d359b74… is unchanged since 94af111): five legacy rows backfilled at ~09:59Z (two carry the incident note) and one reserve plus one commit for snapshot:5e51403b at 10:36:22Z. Readers label the five ledgered-legacy-backfilled; their published_at is the manifest build time copied by the backfill, and their manifest.json file bytes are not bound (canonical digest only). derived/cohorts has no ledger or lock yet: its three cohorts read as unledgered-pre-ledger-cohort-store. Building any new cohort there creates the cohort ledger, after which those three are refused until the owner adopts them (writer statement, not done). Rows are file entries, not table rows, so populated stays none.",
       "uncertainty": "Q-005 blockers at d6049e2: B1 crash window after the rename allowed a same-ID republish; B2 reads never consulted the ledger; B3 failed-publish cleanup masked the error. Q-020 (reviews/corpus-pilot-review-v0.2.md) closed B1 and B3 at 94af111 and kept B2 open on its R1 (a symlinked store entry served as standalone-not-ledger-checked), with R2 (cohort reads), R3 (reserve->commit window), R4 (untyped absent entries) and R5 (seal fsync order). Accepted at 63f4221 for the authorized local cooperating-writer pilot by the independent final review (reviews/corpus-pilot-review-v0.3.md, review c5df3251): R1-R5 closed. Not proven beyond that scope. Writer changes: store membership from the lexical and resolved parent; symlinked or escaping entries, payload symlinks and misplaced IDs refused with symlinked-entry or misplaced before hashing; StoreEntry reads always ledger=require with expected_sid; a writer that finds reserved waits on the per-ID build lock; typed refusals for absent entries; seal fsyncs after the final modes. fsync_dir still ignores OSError. Limits stated by the protocol: cooperating writers on one host; same-owner edits, ledger deletion and root are not prevented; symlink checks are time-of-read; the ledger is not a signature. Open, non-blocking (v0.3 §9): N1 a reader refusal inside a live reserve window says the writer is gone (wording; the read still fails closed); N2 API cohort reads default to auto and label pre-ledger cohorts standalone (wording); N3 publication-clean-stage is guarded by age only. Not tested: same-owner tampering, root, multi-host, real power loss (crashes are process kills).",
       "verified_by": [
-        "q023-writer-disk-057a0b7",
-        "q023-writer-inmemory-057a0b7",
+        "q023-reviewer-disk-057a0b7",
+        "q023-reviewer-inmemory-057a0b7",
         "review-v03-disk-63f4221",
         "q021-disk-63f4221",
         "backend-q022-disk-63f4221",
@@ -826,8 +826,8 @@
       "scope": "A cohort is a filtered, hash-ordered sample (20,896 of 23,289 records eligible), not representative corpus statistics.",
       "coverage": "Four cohorts in the real store: 30, 300 and the 51-record eBL∩ccpo cohort (cohort-1, adopted into the new cohort ledger on 2026-11-05 after an independent byte check, scratch/q023-full-import/evidence/adopt-before.json; payload bytes unchanged) and the all-eligible cohort:4e532850... (cohort-2, 20,896 members + 2,393 excluded = 23,289). Scratch-only stage cohorts (1,000, 1,500, 5,000) live in scratch/q023-full-import/stage-root.",
       "verified_by": [
-        "q023-writer-disk-057a0b7",
-        "q023-writer-inmemory-057a0b7",
+        "q023-reviewer-disk-057a0b7",
+        "q023-reviewer-inmemory-057a0b7",
         "review-v03-disk-63f4221",
         "q021-disk-63f4221",
         "backend-q022-disk-63f4221",
@@ -4057,8 +4057,8 @@
       ],
       "notes": "Manifest value, not rows. Disk level rests on the corpus worker's UNVERIFIED d6049e2 run (historically the parent's 2ab620b run).",
       "verified_by": [
-        "q023-writer-disk-057a0b7",
-        "q023-writer-inmemory-057a0b7",
+        "q023-reviewer-disk-057a0b7",
+        "q023-reviewer-inmemory-057a0b7",
         "review-v03-disk-63f4221",
         "q021-disk-63f4221",
         "backend-q022-disk-63f4221",
@@ -4997,7 +4997,7 @@
       "kind": "interface",
       "domain": "interfaces",
       "label": "Research UI (sibling cuneiform-ui)",
-      "summary": "Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui at 4dcc416, pinned to backend 057a0b7 (Q-023, writer-tested; the accepted pilot pin was 63f4221), with an isolated, authenticated FalkorDB behind bounded query templates. Serves the full eligible eBL snapshot with a labelled bounded per-request check. Not end-to-end SPEC.",
+      "summary": "Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui at 4dcc416, pinned to backend 057a0b7 (Q-023 independently accepted by reviews/full-corpus-review-v0.1.md; pilot pin was 63f4221), with an isolated, authenticated FalkorDB behind bounded query templates. Serves the full eligible eBL snapshot with a labelled bounded per-request check. Not end-to-end SPEC.",
       "status": {
         "modeled": "documented",
         "implemented": "code",
@@ -5206,6 +5206,30 @@
       "command": "CUNEIFORM_TEST_MAX_TOTAL_GIB=41 CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests (clean git archive export of 057a0b7)",
       "result": "Ran 75 tests in 44.8s, OK, 0 skipped (70 earlier + 5 new in tests/test_full_import.py). Without the explicit budget variable, the 29 disk tests error at admission (root 14.4 GB > default 5 GiB), by design.",
       "attribution": "UNVERIFIED: implementer-reported; the independent Q-023 reviewer re-runs it."
+    },
+    {
+      "id": "q023-reviewer-inmemory-057a0b7",
+      "level": "unit",
+      "outcome": "pass",
+      "observer": "Independent full-corpus reviewer c0273cbf",
+      "read_back": true,
+      "date": "2026-11-05",
+      "code_ref": "057a0b7",
+      "command": "<venv>/python -B -m unittest discover -s tests (clean git archive export of 057a0b7)",
+      "result": "Ran 75, OK, skipped=30, 14.8 s",
+      "attribution": "Independent run read back from reviews/full-corpus-review-v0.1.md section 9; original writer run retained."
+    },
+    {
+      "id": "q023-reviewer-disk-057a0b7",
+      "level": "disk",
+      "outcome": "pass",
+      "observer": "Independent full-corpus reviewer c0273cbf",
+      "read_back": true,
+      "date": "2026-11-05",
+      "code_ref": "057a0b7",
+      "command": "CUNEIFORM_TEST_MAX_TOTAL_GIB=41 CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests (clean git archive export of 057a0b7)",
+      "result": "Ran 75, OK, 0 skipped, 42.9 s",
+      "attribution": "Independent run read back from reviews/full-corpus-review-v0.1.md section 9; original writer run retained."
     }
   ],
   "runtime_unexercised": {
@@ -5276,12 +5300,15 @@
       ]
     },
     "snapshot:965aa26214dc0388dd3af1be367d2acc": {
-      "status": "pending-review",
+      "status": "accepted",
       "source": "ebl-cohort",
       "ledger": "ledgered",
       "writer_commit": "5c7a01b",
       "manifest_sha256": "44a20685b069802c46a2b9c158239ccf369c5f5f566f7267ad8a86dc298e3c84",
-      "note": "Q-023 full eligible eBL release: cohort:4e532850... (cohort-2, size=None, rule usable-text-v1), 20,896 of 23,289 parent records, 2,393 excluded with per-record reasons (2,171 / 154 / 66 / 2). Projection preset full (12M positions / 80M rows). Ledger format 2 reserve+commit 2026-11-05T10:19:55Z. Counts (writer-observed): occurrence 4,542,153; edge 12,167,645; ngram 12,292,380; posting 2,883,814; line 629,335; translation_segment 23,984; exclusion 1,051,657; claim 16,735; sign_type 649. Built by the 5c7a01b tree (build code equal to 057a0b7; 057a0b7 changed tests and lookups only). Not cited as corpus_evidence until an independent review reads it."
+      "note": "Q-023 full eligible eBL release: cohort:4e532850... (cohort-2, size=None, rule usable-text-v1), 20,896 of 23,289 parent records, 2,393 excluded with per-record reasons (2,171 / 154 / 66 / 2). Projection preset full (12M positions / 80M rows). Ledger format 2 reserve+commit 2026-11-05T10:19:55Z. Counts (writer-observed): occurrence 4,542,153; edge 12,167,645; ngram 12,292,380; posting 2,883,814; line 629,335; translation_segment 23,984; exclusion 1,051,657; claim 16,735; sign_type 649. Built by the 5c7a01b tree (build code equal to 057a0b7; 057a0b7 changed tests and lookups only). Not cited as corpus_evidence until an independent review reads it. Independently accepted for fixed-release eligible text scope on 2026-11-05; all 4,542,153 offsets and 28 motif counts verified. Strict evidence remains unavailable under conservative-3.",
+      "accepted_by": [
+        "reviews/full-corpus-review-v0.1.md"
+      ]
     }
   }
 }

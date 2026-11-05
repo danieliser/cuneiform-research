@@ -124,6 +124,8 @@ A `verified` status is backed by these recorded runs. Each run names who observe
 | `review-v03-disk-63f4221` | disk | pass | Final publication review c5df3251 (independent of the Q-022 fix worker) | yes | 2026-11-03 | `63f4221` | `CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests -v (clean git archive export of 63f4221), plus reversed order and the 11 store-read tests one by one` | Ran 70 tests in 40.787s, OK, 0 skipped; reversed 70 OK, 0 skipped; 11/11 isolated OK. Real-store fingerprint 266 entries, 0 differences; ledger SHA-256 6d359b74… unchanged. | Recorded from reviews/corpus-pilot-review-v0.3.md §8 and §7 on the parent's instruction (independent reviewer). Not re-run by the atlas worker; its own run q021-disk-63f4221 gives the same 70 OK. |
 | `q023-writer-inmemory-057a0b7` | unit | pass | Q-023 full-import implementation sub-agent (the writer) | no (UNVERIFIED) | 2026-11-05 | `057a0b7` | `<venv>/python -B -m unittest discover -s tests (clean git archive export of 057a0b7)` | Ran 75 tests in 14.5s, OK (skipped=30) | UNVERIFIED: implementer-reported; the independent Q-023 reviewer re-runs it. |
 | `q023-writer-disk-057a0b7` | disk | pass | Q-023 full-import implementation sub-agent (the writer) | no (UNVERIFIED) | 2026-11-05 | `057a0b7` | `CUNEIFORM_TEST_MAX_TOTAL_GIB=41 CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests (clean git archive export of 057a0b7)` | Ran 75 tests in 44.8s, OK, 0 skipped (70 earlier + 5 new in tests/test_full_import.py). Without the explicit budget variable, the 29 disk tests error at admission (root 14.4 GB > default 5 GiB), by design. | UNVERIFIED: implementer-reported; the independent Q-023 reviewer re-runs it. |
+| `q023-reviewer-inmemory-057a0b7` | unit | pass | Independent full-corpus reviewer c0273cbf | yes | 2026-11-05 | `057a0b7` | `<venv>/python -B -m unittest discover -s tests (clean git archive export of 057a0b7)` | Ran 75, OK, skipped=30, 14.8 s | Independent run read back from reviews/full-corpus-review-v0.1.md section 9; original writer run retained. |
+| `q023-reviewer-disk-057a0b7` | disk | pass | Independent full-corpus reviewer c0273cbf | yes | 2026-11-05 | `057a0b7` | `CUNEIFORM_TEST_MAX_TOTAL_GIB=41 CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests (clean git archive export of 057a0b7)` | Ran 75, OK, 0 skipped, 42.9 s | Independent run read back from reviews/full-corpus-review-v0.1.md section 9; original writer run retained. |
 
 ### Corpus snapshots (evidence eligibility)
 
@@ -132,11 +134,11 @@ Only `accepted` snapshots may be cited as `corpus_evidence`. `--runtime` reads e
 | Snapshot | Status | Source | Ledger | Writer code | Accepted by | Note |
 |---|---|---|---|---|---|---|
 | `snapshot:5e51403b0d7dcdb90cb429d444e6a23b` | accepted | oracc-selection | ledgered | 94af111 | reviews/corpus-pilot-review-v0.2.md, reviews/corpus-pilot-review-v0.3.md | ORACC ccpo rebuilt by adapter oracc-cdl-2 (Q-005 F4 fix), ledger format 2 reserve/commit at 10:36:22Z. Q-020 (v0.2 §7) verified its content and all 4,544 IN_SENSE source links against the raw nodes; v0.3 verified it ledgered and bytes-bound at 63f4221 and accepted the publication for the pilot. Its sense provenance supersedes edaab55c. Not yet cited as corpus_evidence (edaab55c counts are equal and remain cited). |
+| `snapshot:965aa26214dc0388dd3af1be367d2acc` | accepted | ebl-cohort | ledgered | 5c7a01b | reviews/full-corpus-review-v0.1.md | Q-023 full eligible eBL release: cohort:4e532850... (cohort-2, size=None, rule usable-text-v1), 20,896 of 23,289 parent records, 2,393 excluded with per-record reasons (2,171 / 154 / 66 / 2). Projection preset full (12M positions / 80M rows). Ledger format 2 reserve+commit 2026-11-05T10:19:55Z. Counts (writer-observed): occurrence 4,542,153; edge 12,167,645; ngram 12,292,380; posting 2,883,814; line 629,335; translation_segment 23,984; exclusion 1,051,657; claim 16,735; sign_type 649. Built by the 5c7a01b tree (build code equal to 057a0b7; 057a0b7 changed tests and lookups only). Not cited as corpus_evidence until an independent review reads it. Independently accepted for fixed-release eligible text scope on 2026-11-05; all 4,542,153 offsets and 28 motif counts verified. Strict evidence remains unavailable under conservative-3. |
 | `snapshot:c316e7cbbaf8a7fca7705f0efa5c4a07` | accepted | ebl-cohort | legacy-backfilled | d6049e2 | reviews/atlas-recheck-v0.1.md | eBL∩ccpo P-number cohort (51 records). Published once; ledger row backfilled at ~09:59Z. Q-019 recounted every cited count from copies of its rows (0 mismatches). Q-005 accepted the pilot data surfaces. |
 | `snapshot:edaab55c1a39cc65ad7c76e6d12547a7` | accepted | oracc-selection | legacy-backfilled | d6049e2 | reviews/atlas-recheck-v0.1.md | ORACC ccpo, adapter oracc-cdl-1, 51 texts. Counts recounted by Q-019 and still valid. Superseded by snapshot:5e51403b for sense provenance: 1,309 Sense rows carry an instance sig (Q-005 F4), which is not the oracc-cdl-2 contract. Kept, never deleted. |
 | `snapshot:fc7c350439f9edfee61b5f35bdd4d65a` | accepted | cdli-selection | legacy-backfilled | d6049e2 | reviews/atlas-recheck-v0.1.md | CDLI artifact JSON selection, 51 artifacts, catalog claims only (0 edges). Counts recounted by Q-019. |
 | `snapshot:84971360d212834e0b7acbeac1e56abe` | incident | ebl-cohort | legacy-backfilled | d6049e2 | — | Deleted and rebuilt under the same ID at ~09:46Z (UI review F-4). First-version bytes not retained. Never evidence; kept, never deleted. |
-| `snapshot:965aa26214dc0388dd3af1be367d2acc` | pending-review | ebl-cohort | ledgered | 5c7a01b | — | Q-023 full eligible eBL release: cohort:4e532850... (cohort-2, size=None, rule usable-text-v1), 20,896 of 23,289 parent records, 2,393 excluded with per-record reasons (2,171 / 154 / 66 / 2). Projection preset full (12M positions / 80M rows). Ledger format 2 reserve+commit 2026-11-05T10:19:55Z. Counts (writer-observed): occurrence 4,542,153; edge 12,167,645; ngram 12,292,380; posting 2,883,814; line 629,335; translation_segment 23,984; exclusion 1,051,657; claim 16,735; sign_type 649. Built by the 5c7a01b tree (build code equal to 057a0b7; 057a0b7 changed tests and lookups only). Not cited as corpus_evidence until an independent review reads it. |
 | `snapshot:ce127437339109285185a534145edf50` | incident | ebl | legacy-backfilled | d6049e2 | — | Deleted and rebuilt under the same ID at ~09:46Z (UI review F-4). First-version bytes not retained. Never evidence; kept, never deleted. |
 
 ### Runtime coverage
@@ -154,19 +156,19 @@ Immutable raw bytes, source records, snapshot bindings, manifests, rights and ac
 
 | ID | Kind | Modeled | Implemented | Populated | Verified | Backing | Queue |
 |---|---|---|---|---|---|---|---|
-| `node:SourceRecord` | node | specified | code | corpus | unit (UNVERIFIED) | table `source_record` | Q-011, Q-012, Q-013, Q-005 |
-| `table:source_binding` | table | documented | code | corpus | unit (UNVERIFIED) | table `source_binding` | — |
-| `table:registry` | table | documented | code | corpus | unit (UNVERIFIED) | table `registry` | — |
-| `table:rejection` | table | specified | code | synthetic | unit (UNVERIFIED) | table `rejection` | — |
-| `table:exclusion` | table | specified | code | corpus | unit (UNVERIFIED) | table `exclusion` | — |
-| `artifact:snapshot-manifest` | artifact | specified | code | synthetic | disk (UNVERIFIED) | `cuneiform/storage.py::StoreEntry`, `cuneiform/storage.py::import_cohort`, `cuneiform/storage.py::import_source`, `cuneiform/storage.py::materialize`, `cuneiform/storage.py::snapshot_identity`, `cuneiform/storage.py::store_entry`, `cuneiform/storage.py::verified`, `cuneiform/storage.py::verify`, `cuneiform/storage.py::verify_content` | Q-012, Q-001, Q-005 |
-| `artifact:publication-ledger` | artifact | documented | code | none | disk (UNVERIFIED) | `cuneiform/publication.py::LEDGER`, `cuneiform/publication.py::Ledger`, `cuneiform/publication.py::PublicationError`, `cuneiform/publication.py::adopt`, `cuneiform/publication.py::build_lock`, `cuneiform/publication.py::check_published`, `cuneiform/publication.py::locate_entry`, `cuneiform/publication.py::missing_entry`, `cuneiform/publication.py::publish_dir`, `cuneiform/publication.py::recover`, `cuneiform/storage.py::LEDGER`, `cuneiform/storage.py::StoreEntry`, `cuneiform/storage.py::existing_snapshot`, `cuneiform/storage.py::publish`, `cuneiform/storage.py::resolve_snapshot`, `cuneiform/storage.py::store_entry`, `cuneiform/storage.py::store_path`, `cuneiform/storage.py::verified` | Q-001, Q-005, Q-020, Q-022 |
+| `node:SourceRecord` | node | specified | code | corpus | unit | table `source_record` | Q-011, Q-012, Q-013, Q-005 |
+| `table:source_binding` | table | documented | code | corpus | unit | table `source_binding` | — |
+| `table:registry` | table | documented | code | corpus | unit | table `registry` | — |
+| `table:rejection` | table | specified | code | synthetic | unit | table `rejection` | — |
+| `table:exclusion` | table | specified | code | corpus | unit | table `exclusion` | — |
+| `artifact:snapshot-manifest` | artifact | specified | code | synthetic | disk | `cuneiform/storage.py::StoreEntry`, `cuneiform/storage.py::import_cohort`, `cuneiform/storage.py::import_source`, `cuneiform/storage.py::materialize`, `cuneiform/storage.py::snapshot_identity`, `cuneiform/storage.py::store_entry`, `cuneiform/storage.py::verified`, `cuneiform/storage.py::verify`, `cuneiform/storage.py::verify_content` | Q-012, Q-001, Q-005 |
+| `artifact:publication-ledger` | artifact | documented | code | none | disk | `cuneiform/publication.py::LEDGER`, `cuneiform/publication.py::Ledger`, `cuneiform/publication.py::PublicationError`, `cuneiform/publication.py::adopt`, `cuneiform/publication.py::build_lock`, `cuneiform/publication.py::check_published`, `cuneiform/publication.py::locate_entry`, `cuneiform/publication.py::missing_entry`, `cuneiform/publication.py::publish_dir`, `cuneiform/publication.py::recover`, `cuneiform/storage.py::LEDGER`, `cuneiform/storage.py::StoreEntry`, `cuneiform/storage.py::existing_snapshot`, `cuneiform/storage.py::publish`, `cuneiform/storage.py::resolve_snapshot`, `cuneiform/storage.py::store_entry`, `cuneiform/storage.py::store_path`, `cuneiform/storage.py::verified` | Q-001, Q-005, Q-020, Q-022 |
 | `artifact:acquisition-receipt` | artifact | documented | code | none | none | `cuneiform/acquire.py::acquire`, `cuneiform/acquire.py::write_receipt`, `cuneiform/acquire.py::verify_raw` | Q-005, Q-013 |
-| `artifact:cohort-manifest` | artifact | documented | code | none | disk (UNVERIFIED) | `cuneiform/corpus.py::build_cohort`, `cuneiform/corpus.py::iter_array`, `cuneiform/corpus.py::verify_cohort`, `cuneiform/storage.py::import_cohort`, `cuneiform/corpus.py::accounting` | Q-005, Q-012, Q-020, Q-022, Q-023 |
+| `artifact:cohort-manifest` | artifact | documented | code | none | disk | `cuneiform/corpus.py::build_cohort`, `cuneiform/corpus.py::iter_array`, `cuneiform/corpus.py::verify_cohort`, `cuneiform/storage.py::import_cohort`, `cuneiform/corpus.py::accounting` | Q-005, Q-012, Q-020, Q-022, Q-023 |
 | `artifact:selection-manifest` | artifact | documented | code | none | none | `cuneiform/oracc.py::import_project`, `cuneiform/cdli_api.py::import_artifacts` | Q-005, Q-011, Q-013 |
-| `concept:rights-ledger` | concept | specified | code | none | unit (UNVERIFIED) | `cuneiform/adapters.py::RIGHTS`, `cuneiform/cdli_api.py::RIGHTS` | Q-011, Q-012, Q-013, Q-005 |
-| `value:SourceLocator` | value | documented | code | none | unit (UNVERIFIED) | `cuneiform/model.py::SourceLocator`, `cuneiform/query.py::trace_rows` | — |
-| `edge:ATTRIBUTED_TO` | edge | documented | code | sample | unit (UNVERIFIED) | portable_edge | Q-009 |
+| `concept:rights-ledger` | concept | specified | code | none | unit | `cuneiform/adapters.py::RIGHTS`, `cuneiform/cdli_api.py::RIGHTS` | Q-011, Q-012, Q-013, Q-005 |
+| `value:SourceLocator` | value | documented | code | none | unit | `cuneiform/model.py::SourceLocator`, `cuneiform/query.py::trace_rows` | — |
+| `edge:ATTRIBUTED_TO` | edge | documented | code | sample | unit | portable_edge | Q-009 |
 
 #### `node:SourceRecord` — SourceRecord
 
@@ -271,7 +273,7 @@ Per-snapshot manifest: identity inputs, contract, versions, rights, payload hash
 - **Evidence notes:** Disk level rests on the corpus worker's own run at d6049e2 (UNVERIFIED, not read back) and, historically, on the parent's 2ab620b run. The atlas worker observed only the in-memory suite at d6049e2. The manifest is not rows, so its populated level is not raised to corpus; the five verified real manifests are listed under coverage.
 - **Files:** `cuneiform/storage.py`, `cuneiform/oracc.py`, `cuneiform/cdli_api.py`
 - **Evidence:** `tests/test_disk_delivery.py::test_snapshot_idempotence_relocation_parquet_and_tamper`, `tests/test_review_regressions.py::test_incomplete_manifest_rejected`, `tests/test_projections.py::test_variable_manifest_inventory_without_disk`, `tests/test_corpus_pilot.py::test_ledger_read_only_and_contract_identity`, `tests/test_corpus_pilot.py::test_snapshots_verify_parity_and_traces`
-- **Verified by:** `q023-writer-disk-057a0b7` (Q-023 full-import implementation sub-agent (the writer), 2026-11-05, code `057a0b7`); `q023-writer-inmemory-057a0b7` (Q-023 full-import implementation sub-agent (the writer), 2026-11-05, code `057a0b7`); `review-v03-disk-63f4221` (Final publication review c5df3251 (independent of the Q-022 fix worker), 2026-11-03, code `63f4221`); `q021-disk-63f4221` (Atlas repair worker (Q-021), 2026-11-03, code `63f4221`); `backend-q022-disk-63f4221` (Q-022 backend fix worker (Q-020 R1-R5 round), 2026-11-03, code `63f4221`); `q020-disk-94af111` (Q-020 review sub-agent (independent of fix task 44ddaeb1), 2026-11-03, code `94af111`); `backend-fix-disk-94af111` (Backend fix worker, task 44ddaeb1 (Q-001 fix round), 2026-11-03, code `94af111`); `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`); `parent-full-disk-2ab620b` (Parent orchestrator, 2026-11-03, code `2ab620b`)
+- **Verified by:** `q023-reviewer-disk-057a0b7` (Independent full-corpus reviewer c0273cbf, 2026-11-05, code `057a0b7`); `q023-reviewer-inmemory-057a0b7` (Independent full-corpus reviewer c0273cbf, 2026-11-05, code `057a0b7`); `review-v03-disk-63f4221` (Final publication review c5df3251 (independent of the Q-022 fix worker), 2026-11-03, code `63f4221`); `q021-disk-63f4221` (Atlas repair worker (Q-021), 2026-11-03, code `63f4221`); `backend-q022-disk-63f4221` (Q-022 backend fix worker (Q-020 R1-R5 round), 2026-11-03, code `63f4221`); `q020-disk-94af111` (Q-020 review sub-agent (independent of fix task 44ddaeb1), 2026-11-03, code `94af111`); `backend-fix-disk-94af111` (Backend fix worker, task 44ddaeb1 (Q-001 fix round), 2026-11-03, code `94af111`); `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`); `parent-full-disk-2ab620b` (Parent orchestrator, 2026-11-03, code `2ab620b`)
 - **Sources:** docs/INGESTION-DESIGN.md, CHECKPOINT.md
 
 | Field | Type | Nullable | Key | Note |
@@ -313,7 +315,7 @@ Append-only publication ledger under an exclusive lock (cuneiform/publication.py
 - **Coverage:** Seven rows at 63f4221 (read by the atlas worker; ledger SHA-256 6d359b74… is unchanged since 94af111): five legacy rows backfilled at ~09:59Z (two carry the incident note) and one reserve plus one commit for snapshot:5e51403b at 10:36:22Z. Readers label the five ledgered-legacy-backfilled; their published_at is the manifest build time copied by the backfill, and their manifest.json file bytes are not bound (canonical digest only). derived/cohorts has no ledger or lock yet: its three cohorts read as unledgered-pre-ledger-cohort-store. Building any new cohort there creates the cohort ledger, after which those three are refused until the owner adopts them (writer statement, not done). Rows are file entries, not table rows, so populated stays none.
 - **Files:** `cuneiform/publication.py`, `cuneiform/storage.py`, `cuneiform/corpus.py`, `docs/PUBLICATION-PROTOCOL.md`
 - **Evidence:** `tests/test_publication.py::test_kill_after_rename_fails_closed_then_delete_cannot_republish`, `tests/test_publication.py::test_replaced_build_refused_restoration_bound_standalone_labelled`, `tests/test_publication.py::test_rename_failure_raises_original_error_and_leaves_no_stage`, `tests/test_publication.py::test_states_and_conflicts`, `tests/test_corpus_pilot.py::test_ledger_read_only_and_contract_identity`, `tests/test_store_reads.py::test_symlinked_entry_same_id_different_bytes_refused_everywhere`, `tests/test_store_reads.py::test_id_x_never_resolves_to_snapshot_y`, `tests/test_store_reads.py::test_nested_path_forms`, `tests/test_store_reads.py::test_dangling_symlink_and_symlinked_dest_on_writer_and_recovery_side`, `tests/test_store_reads.py::test_absent_entry_refusals_are_typed`, `tests/test_store_reads.py::test_writer_and_recovery_inside_live_reserve_commit_window`, `tests/test_store_reads.py::test_seal_fsyncs_after_final_modes`
-- **Verified by:** `q023-writer-disk-057a0b7` (Q-023 full-import implementation sub-agent (the writer), 2026-11-05, code `057a0b7`); `q023-writer-inmemory-057a0b7` (Q-023 full-import implementation sub-agent (the writer), 2026-11-05, code `057a0b7`); `review-v03-disk-63f4221` (Final publication review c5df3251 (independent of the Q-022 fix worker), 2026-11-03, code `63f4221`); `q021-disk-63f4221` (Atlas repair worker (Q-021), 2026-11-03, code `63f4221`); `backend-q022-disk-63f4221` (Q-022 backend fix worker (Q-020 R1-R5 round), 2026-11-03, code `63f4221`); `q020-disk-94af111` (Q-020 review sub-agent (independent of fix task 44ddaeb1), 2026-11-03, code `94af111`); `backend-fix-disk-94af111` (Backend fix worker, task 44ddaeb1 (Q-001 fix round), 2026-11-03, code `94af111`); `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`)
+- **Verified by:** `q023-reviewer-disk-057a0b7` (Independent full-corpus reviewer c0273cbf, 2026-11-05, code `057a0b7`); `q023-reviewer-inmemory-057a0b7` (Independent full-corpus reviewer c0273cbf, 2026-11-05, code `057a0b7`); `review-v03-disk-63f4221` (Final publication review c5df3251 (independent of the Q-022 fix worker), 2026-11-03, code `63f4221`); `q021-disk-63f4221` (Atlas repair worker (Q-021), 2026-11-03, code `63f4221`); `backend-q022-disk-63f4221` (Q-022 backend fix worker (Q-020 R1-R5 round), 2026-11-03, code `63f4221`); `q020-disk-94af111` (Q-020 review sub-agent (independent of fix task 44ddaeb1), 2026-11-03, code `94af111`); `backend-fix-disk-94af111` (Backend fix worker, task 44ddaeb1 (Q-001 fix round), 2026-11-03, code `94af111`); `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`)
 - **Sources:** CHECKPOINT.md, docs/PUBLICATION-PROTOCOL.md, docs/CORPUS-REVIEW-v0.1-DISPOSITION.md, docs/CORPUS-REVIEW-v0.2-DISPOSITION.md, reviews/corpus-pilot-review-v0.3.md
 
 #### `artifact:acquisition-receipt` — Acquisition receipt and content-addressed raw store
@@ -335,7 +337,7 @@ Deterministic rule-selected cohort (usable-text-v1, order sha256(parent_sha256 +
 - **Coverage:** Four cohorts in the real store: 30, 300 and the 51-record eBL∩ccpo cohort (cohort-1, adopted into the new cohort ledger on 2026-11-05 after an independent byte check, scratch/q023-full-import/evidence/adopt-before.json; payload bytes unchanged) and the all-eligible cohort:4e532850... (cohort-2, 20,896 members + 2,393 excluded = 23,289). Scratch-only stage cohorts (1,000, 1,500, 5,000) live in scratch/q023-full-import/stage-root.
 - **Files:** `cuneiform/corpus.py`, `cuneiform/publication.py`
 - **Evidence:** `tests/test_corpus_pilot.py::test_cohort_determinism_prefix_trace_tamper_and_chunked_parity`, `tests/test_corpus_pilot.py::test_exact_byte_ranges_across_tiny_chunks_and_envelopes`, `tests/test_store_reads.py::test_kill_after_rename_cohort_refused_then_recovered_with_byte_binding`, `tests/test_store_reads.py::test_kill_after_reserve_cohort_complete_and_discard`, `tests/test_store_reads.py::test_unrecorded_symlinked_misplaced_and_pre_ledger_cohorts`, `tests/test_store_reads.py::test_concurrent_cohort_builders_build_once`, `tests/test_full_import.py::test_complete_partition_and_every_defect`, `tests/test_full_import.py::test_all_eligible_cohort_accounts_for_every_parent_record_and_labels_scope`
-- **Verified by:** `q023-writer-disk-057a0b7` (Q-023 full-import implementation sub-agent (the writer), 2026-11-05, code `057a0b7`); `q023-writer-inmemory-057a0b7` (Q-023 full-import implementation sub-agent (the writer), 2026-11-05, code `057a0b7`); `review-v03-disk-63f4221` (Final publication review c5df3251 (independent of the Q-022 fix worker), 2026-11-03, code `63f4221`); `q021-disk-63f4221` (Atlas repair worker (Q-021), 2026-11-03, code `63f4221`); `backend-q022-disk-63f4221` (Q-022 backend fix worker (Q-020 R1-R5 round), 2026-11-03, code `63f4221`); `q020-disk-94af111` (Q-020 review sub-agent (independent of fix task 44ddaeb1), 2026-11-03, code `94af111`); `backend-fix-disk-94af111` (Backend fix worker, task 44ddaeb1 (Q-001 fix round), 2026-11-03, code `94af111`); `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`)
+- **Verified by:** `q023-reviewer-disk-057a0b7` (Independent full-corpus reviewer c0273cbf, 2026-11-05, code `057a0b7`); `q023-reviewer-inmemory-057a0b7` (Independent full-corpus reviewer c0273cbf, 2026-11-05, code `057a0b7`); `review-v03-disk-63f4221` (Final publication review c5df3251 (independent of the Q-022 fix worker), 2026-11-03, code `63f4221`); `q021-disk-63f4221` (Atlas repair worker (Q-021), 2026-11-03, code `63f4221`); `backend-q022-disk-63f4221` (Q-022 backend fix worker (Q-020 R1-R5 round), 2026-11-03, code `63f4221`); `q020-disk-94af111` (Q-020 review sub-agent (independent of fix task 44ddaeb1), 2026-11-03, code `94af111`); `backend-fix-disk-94af111` (Backend fix worker, task 44ddaeb1 (Q-001 fix round), 2026-11-03, code `94af111`); `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`)
 - **Sources:** docs/SOURCE-AUDIT.md, docs/CORPUS-REVIEW-v0.2-DISPOSITION.md
 
 #### `artifact:selection-manifest` — ORACC / CDLI selection manifest (selection.json)
@@ -385,11 +387,11 @@ Physical tablets/fragments, manuscript contributions, abstract works/passages, m
 
 | ID | Kind | Modeled | Implemented | Populated | Verified | Backing | Queue |
 |---|---|---|---|---|---|---|---|
-| `node:Artifact` | node | specified | code | corpus | unit (UNVERIFIED) | table `artifact` | Q-013, Q-015 |
-| `node:Witness` | node | specified | code | corpus | unit (UNVERIFIED) | table `witness` | Q-012 |
-| `edge:ON_ARTIFACT` | edge | specified | code | corpus | unit (UNVERIFIED) | model.EDGE_TYPES | — |
-| `node:Composition` | node | specified | schema | none | unit (UNVERIFIED) | table `composition` | Q-012 |
-| `node:Passage` | node | specified | schema | none | unit (UNVERIFIED) | table `passage` | Q-012 |
+| `node:Artifact` | node | specified | code | corpus | unit | table `artifact` | Q-013, Q-015 |
+| `node:Witness` | node | specified | code | corpus | unit | table `witness` | Q-012 |
+| `edge:ON_ARTIFACT` | edge | specified | code | corpus | unit | model.EDGE_TYPES | — |
+| `node:Composition` | node | specified | schema | none | unit | table `composition` | Q-012 |
+| `node:Passage` | node | specified | schema | none | unit | table `passage` | Q-012 |
 | `relation:passage.composition_id` | relation | documented | schema | none | none | table_column `passage.composition_id` | Q-012 |
 | `edge:ATTESTS` | edge | specified | none | none | none | — | Q-012 |
 | `node:Edition` | node | specified | none | none | none | — | Q-012, Q-014 |
@@ -580,17 +582,17 @@ Source-ordered represented positions, readings, source-derived sign identities a
 
 | ID | Kind | Modeled | Implemented | Populated | Verified | Backing | Queue |
 |---|---|---|---|---|---|---|---|
-| `node:SequenceVersion` | node | specified | code | corpus | unit (UNVERIFIED) | table `sequence_version` | — |
-| `edge:HAS_SEQUENCE` | edge | specified | code | corpus | unit (UNVERIFIED) | model.EDGE_TYPES | — |
-| `node:Line` | node | specified | code | corpus | unit (UNVERIFIED) | table `line` | — |
-| `edge:HAS_LINE` | edge | specified | code | corpus | unit (UNVERIFIED) | model.EDGE_TYPES | — |
-| `edge:NEXT_LINE` | edge | specified | code | corpus | unit (UNVERIFIED) | model.EDGE_TYPES | — |
-| `node:SignOccurrence` | node | specified | code | corpus | unit (UNVERIFIED) | table `occurrence` | Q-012, Q-017 |
-| `value:uncertainty-fields` | value | specified | code | sample | unit (UNVERIFIED) | table_column `occurrence.preservation` | Q-017 |
-| `edge:HAS_OCCURRENCE` | edge | specified | code | corpus | unit (UNVERIFIED) | model.EDGE_TYPES | — |
-| `edge:NEXT` | edge | specified | code | corpus | unit (UNVERIFIED) | model.EDGE_TYPES | — |
-| `node:SignType` | node | specified | code | corpus | unit (UNVERIFIED) | table `sign_type` | Q-012 |
-| `edge:MAPS_TO_SIGN` | edge | specified | code | corpus | unit (UNVERIFIED) | model.EDGE_TYPES | Q-012 |
+| `node:SequenceVersion` | node | specified | code | corpus | unit | table `sequence_version` | — |
+| `edge:HAS_SEQUENCE` | edge | specified | code | corpus | unit | model.EDGE_TYPES | — |
+| `node:Line` | node | specified | code | corpus | unit | table `line` | — |
+| `edge:HAS_LINE` | edge | specified | code | corpus | unit | model.EDGE_TYPES | — |
+| `edge:NEXT_LINE` | edge | specified | code | corpus | unit | model.EDGE_TYPES | — |
+| `node:SignOccurrence` | node | specified | code | corpus | unit | table `occurrence` | Q-012, Q-017 |
+| `value:uncertainty-fields` | value | specified | code | sample | unit | table_column `occurrence.preservation` | Q-017 |
+| `edge:HAS_OCCURRENCE` | edge | specified | code | corpus | unit | model.EDGE_TYPES | — |
+| `edge:NEXT` | edge | specified | code | corpus | unit | model.EDGE_TYPES | — |
+| `node:SignType` | node | specified | code | corpus | unit | table `sign_type` | Q-012 |
+| `edge:MAPS_TO_SIGN` | edge | specified | code | corpus | unit | model.EDGE_TYPES | Q-012 |
 
 #### `node:SequenceVersion` — SequenceVersion
 
@@ -758,17 +760,17 @@ Disposable projections and query recipes over canonical rows: ordered positions,
 
 | ID | Kind | Modeled | Implemented | Populated | Verified | Backing | Queue |
 |---|---|---|---|---|---|---|---|
-| `view:ordered_position` | view | documented | code | sample | unit (UNVERIFIED) | view `ordered_position` | — |
-| `view:token_context` | view | documented | code | sample | unit (UNVERIFIED) | view `token_context` | — |
-| `view:next_position` | view | documented | code | sample | unit (UNVERIFIED) | view `next_position` | — |
-| `table:posting` | table | documented | code | corpus | unit (UNVERIFIED) | table `posting` | — |
-| `table:ngram` | table | documented | code | corpus | unit (UNVERIFIED) | table `ngram` | — |
-| `table:projection_registry` | table | documented | code | corpus | unit (UNVERIFIED) | table `projection_registry` | Q-023 |
-| `value:match-span-id` | value | specified | code | sample | unit (UNVERIFIED) | `cuneiform/query.py::motif`, `cuneiform/projections.py::build` | — |
-| `query:motif` | query | specified | code | none | unit (UNVERIFIED) | `cuneiform/query.py::motif`, `cuneiform/query.py::array_count` | Q-010, Q-017 |
-| `query:lookup` | query | documented | code | none | unit (UNVERIFIED) | `cuneiform/persisted.py::LayerUnavailable`, `cuneiform/persisted.py::ScopeMismatch`, `cuneiform/persisted.py::lookup_snapshot`, `cuneiform/projections.py::coverage`, `cuneiform/projections.py::lookup`, `cuneiform/projections.py::report`, `cuneiform/projections.py::source_span`, `cuneiform/projections.py::SCOPES_SQL` | Q-008, Q-010, Q-005, Q-023 |
-| `query:trace` | query | specified | code | none | unit (UNVERIFIED) | `cuneiform/query.py::trace`, `cuneiform/query.py::trace_rows`, `cuneiform/oracc.py::trace_word` | Q-010, Q-005 |
-| `value:snapshot-scope` | value | documented | code | none | unit (UNVERIFIED) | `cuneiform/persisted.py::scope` | Q-005, Q-008, Q-023 |
+| `view:ordered_position` | view | documented | code | sample | unit | view `ordered_position` | — |
+| `view:token_context` | view | documented | code | sample | unit | view `token_context` | — |
+| `view:next_position` | view | documented | code | sample | unit | view `next_position` | — |
+| `table:posting` | table | documented | code | corpus | unit | table `posting` | — |
+| `table:ngram` | table | documented | code | corpus | unit | table `ngram` | — |
+| `table:projection_registry` | table | documented | code | corpus | unit | table `projection_registry` | Q-023 |
+| `value:match-span-id` | value | specified | code | sample | unit | `cuneiform/query.py::motif`, `cuneiform/projections.py::build` | — |
+| `query:motif` | query | specified | code | none | unit | `cuneiform/query.py::motif`, `cuneiform/query.py::array_count` | Q-010, Q-017 |
+| `query:lookup` | query | documented | code | none | unit | `cuneiform/persisted.py::LayerUnavailable`, `cuneiform/persisted.py::ScopeMismatch`, `cuneiform/persisted.py::lookup_snapshot`, `cuneiform/projections.py::coverage`, `cuneiform/projections.py::lookup`, `cuneiform/projections.py::report`, `cuneiform/projections.py::source_span`, `cuneiform/projections.py::SCOPES_SQL` | Q-008, Q-010, Q-005, Q-023 |
+| `query:trace` | query | specified | code | none | unit | `cuneiform/query.py::trace`, `cuneiform/query.py::trace_rows`, `cuneiform/oracc.py::trace_word` | Q-010, Q-005 |
+| `value:snapshot-scope` | value | documented | code | none | unit | `cuneiform/persisted.py::scope` | Q-005, Q-008, Q-023 |
 | `node:Pattern` | node | specified | none | none | none | — | Q-010, Q-017 |
 | `node:PatternMatch` | node | specified | none | none | none | — | Q-010 |
 | `concept:compatible-bounds` | concept | specified | none | none | none | — | Q-017 |
@@ -943,18 +945,18 @@ Word instances, dictionary bridge and source-authored translation text. The ORAC
 
 | ID | Kind | Modeled | Implemented | Populated | Verified | Backing | Queue |
 |---|---|---|---|---|---|---|---|
-| `node:WordToken` | node | specified | code | corpus | unit (UNVERIFIED) | table `word_token` | Q-011, Q-005 |
-| `edge:HAS_WORD` | edge | specified | code | corpus | unit (UNVERIFIED) | model.EDGE_TYPES | Q-011, Q-005 |
+| `node:WordToken` | node | specified | code | corpus | unit | table `word_token` | Q-011, Q-005 |
+| `edge:HAS_WORD` | edge | specified | code | corpus | unit | model.EDGE_TYPES | Q-011, Q-005 |
 | `edge:HAS_SIGN` | edge | specified | schema | none | none | model.EDGE_TYPES | Q-011 |
-| `node:Lemma` | node | specified | code | corpus | unit (UNVERIFIED) | table `lemma` | Q-011, Q-005 |
-| `edge:LEMMATIZED_AS` | edge | specified | code | corpus | unit (UNVERIFIED) | model.EDGE_TYPES | Q-011, Q-005 |
-| `node:Sense` | node | specified | code | corpus | unit (UNVERIFIED) | table `sense` | Q-011, Q-005 |
-| `edge:HAS_SENSE` | edge | specified | code | corpus | unit (UNVERIFIED) | model.EDGE_TYPES | Q-011, Q-005 |
-| `edge:IN_SENSE` | edge | documented | code | corpus | unit (UNVERIFIED) | model.EDGE_TYPES | Q-005, Q-011 |
-| `node:TranslationSegment` | node | specified | code | corpus | unit (UNVERIFIED) | table `translation_segment` | Q-011, Q-005 |
-| `edge:PLACED_IN_SEQUENCE` | edge | documented | code | sample | unit (UNVERIFIED) | portable_edge | — |
+| `node:Lemma` | node | specified | code | corpus | unit | table `lemma` | Q-011, Q-005 |
+| `edge:LEMMATIZED_AS` | edge | specified | code | corpus | unit | model.EDGE_TYPES | Q-011, Q-005 |
+| `node:Sense` | node | specified | code | corpus | unit | table `sense` | Q-011, Q-005 |
+| `edge:HAS_SENSE` | edge | specified | code | corpus | unit | model.EDGE_TYPES | Q-011, Q-005 |
+| `edge:IN_SENSE` | edge | documented | code | corpus | unit | model.EDGE_TYPES | Q-005, Q-011 |
+| `node:TranslationSegment` | node | specified | code | corpus | unit | table `translation_segment` | Q-011, Q-005 |
+| `edge:PLACED_IN_SEQUENCE` | edge | documented | code | sample | unit | portable_edge | — |
 | `edge:TRANSLATES` | edge | specified | schema | none | none | model.EDGE_TYPES | Q-011 |
-| `view:translation_context` | view | documented | code | sample | unit (UNVERIFIED) | view `translation_context` | — |
+| `view:translation_context` | view | documented | code | sample | unit | view `translation_context` | — |
 
 #### `node:WordToken` — WordToken
 
@@ -1128,10 +1130,10 @@ Attributed assertions, alternatives, restorations, review history and interpreta
 
 | ID | Kind | Modeled | Implemented | Populated | Verified | Backing | Queue |
 |---|---|---|---|---|---|---|---|
-| `node:Claim` | node | specified | code | corpus | unit (UNVERIFIED) | table `claim` | Q-014, Q-017 |
-| `view:catalog_alias` | view | documented | code | sample | unit (UNVERIFIED) | view `catalog_alias` | — |
-| `edge:CLAIM_SUBJECT` | edge | documented | code | sample | unit (UNVERIFIED) | portable_edge | Q-014 |
-| `value:source-independence` | value | specified | code | sample | unit (UNVERIFIED) | table_column `claim.details` | — |
+| `node:Claim` | node | specified | code | corpus | unit | table `claim` | Q-014, Q-017 |
+| `view:catalog_alias` | view | documented | code | sample | unit | view `catalog_alias` | — |
+| `edge:CLAIM_SUBJECT` | edge | documented | code | sample | unit | portable_edge | Q-014 |
+| `value:source-independence` | value | specified | code | sample | unit | table_column `claim.details` | — |
 | `concept:hypothesis-group` | concept | specified | none | none | none | — | Q-017 |
 | `edge:ALIGNED_WITH` | edge | specified | none | none | none | — | Q-016 |
 | `edge:RESTORED_FROM` | edge | specified | none | none | none | — | Q-017 |
@@ -1238,7 +1240,7 @@ Separates source-asserted time of events/artifacts/custody/publication from syst
 
 | ID | Kind | Modeled | Implemented | Populated | Verified | Backing | Queue |
 |---|---|---|---|---|---|---|---|
-| `temporal:system-time` | value | documented | code | none | disk (UNVERIFIED) | `cuneiform/storage.py::materialize` | Q-014 |
+| `temporal:system-time` | value | documented | code | none | disk | `cuneiform/storage.py::materialize` | Q-014 |
 | `temporal:source-validity` | value | proposed | none | none | none | — | Q-014, Q-015 |
 | `value:TemporalExtent` | value | proposed | none | none | none | — | Q-014, Q-015 |
 | `value:temporal-role` | value | proposed | none | none | none | — | Q-014 |
@@ -1262,7 +1264,7 @@ When this system acquired/imported bytes. Implemented only as manifest retrieved
 - **Notes:** Manifest value, not rows. Disk level rests on the corpus worker's UNVERIFIED d6049e2 run (historically the parent's 2ab620b run).
 - **Files:** `cuneiform/storage.py`
 - **Evidence:** `tests/test_disk_delivery.py::test_snapshot_idempotence_relocation_parquet_and_tamper`
-- **Verified by:** `q023-writer-disk-057a0b7` (Q-023 full-import implementation sub-agent (the writer), 2026-11-05, code `057a0b7`); `q023-writer-inmemory-057a0b7` (Q-023 full-import implementation sub-agent (the writer), 2026-11-05, code `057a0b7`); `review-v03-disk-63f4221` (Final publication review c5df3251 (independent of the Q-022 fix worker), 2026-11-03, code `63f4221`); `q021-disk-63f4221` (Atlas repair worker (Q-021), 2026-11-03, code `63f4221`); `backend-q022-disk-63f4221` (Q-022 backend fix worker (Q-020 R1-R5 round), 2026-11-03, code `63f4221`); `q020-disk-94af111` (Q-020 review sub-agent (independent of fix task 44ddaeb1), 2026-11-03, code `94af111`); `backend-fix-disk-94af111` (Backend fix worker, task 44ddaeb1 (Q-001 fix round), 2026-11-03, code `94af111`); `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`); `parent-full-disk-2ab620b` (Parent orchestrator, 2026-11-03, code `2ab620b`)
+- **Verified by:** `q023-reviewer-disk-057a0b7` (Independent full-corpus reviewer c0273cbf, 2026-11-05, code `057a0b7`); `q023-reviewer-inmemory-057a0b7` (Independent full-corpus reviewer c0273cbf, 2026-11-05, code `057a0b7`); `review-v03-disk-63f4221` (Final publication review c5df3251 (independent of the Q-022 fix worker), 2026-11-03, code `63f4221`); `q021-disk-63f4221` (Atlas repair worker (Q-021), 2026-11-03, code `63f4221`); `backend-q022-disk-63f4221` (Q-022 backend fix worker (Q-020 R1-R5 round), 2026-11-03, code `63f4221`); `q020-disk-94af111` (Q-020 review sub-agent (independent of fix task 44ddaeb1), 2026-11-03, code `94af111`); `backend-fix-disk-94af111` (Backend fix worker, task 44ddaeb1 (Q-001 fix round), 2026-11-03, code `94af111`); `corpus-worker-disk-d6049e2` (Corpus worker, task 64821742 (Q-001), 2026-11-03, code `d6049e2`); `parent-full-disk-2ab620b` (Parent orchestrator, 2026-11-03, code `2ab620b`)
 - **Sources:** cuneiform/storage.py
 
 #### `temporal:source-validity` — Source temporal validity
@@ -1464,13 +1466,13 @@ Canonical edge table, node/edge views, portable Parquet export, CLI, FalkorDB pr
 
 | ID | Kind | Modeled | Implemented | Populated | Verified | Backing | Queue |
 |---|---|---|---|---|---|---|---|
-| `table:edge` | table | specified | code | corpus | unit (UNVERIFIED) | table `edge` | Q-009 |
-| `view:nodes` | view | documented | code | sample | unit (UNVERIFIED) | view `nodes` | Q-009 |
-| `view:portable_edge` | view | documented | code | sample | unit (UNVERIFIED) | view `portable_edge` | Q-009 |
+| `table:edge` | table | specified | code | corpus | unit | table `edge` | Q-009 |
+| `view:nodes` | view | documented | code | sample | unit | view `nodes` | Q-009 |
+| `view:portable_edge` | view | documented | code | sample | unit | view `portable_edge` | Q-009 |
 | `contract:portable-graph-export` | contract | documented | code | none | none | `cuneiform/persisted.py::export_graph`, `cuneiform/persisted.py::EXPORTER` | Q-009, Q-005 |
 | `service:falkordb-projection` | service | specified | none | none | none | — | Q-009, Q-008 |
 | `service:mcp-read-slice` | service | specified | none | none | none | — | Q-010 |
-| `interface:cli` | interface | documented | code | none | unit (UNVERIFIED) | `cuneiform/cli.py::main` | Q-005, Q-020, Q-022, Q-023 |
+| `interface:cli` | interface | documented | code | none | unit | `cuneiform/cli.py::main` | Q-005, Q-020, Q-022, Q-023 |
 | `interface:ui` | interface | documented | code | none | none | external `../cuneiform-ui`@`4dcc416` | Q-002, Q-006, Q-008, Q-023 |
 
 #### `table:edge` — edge (canonical edge store)
@@ -1541,7 +1543,7 @@ python -m cuneiform: demo, explore, fetch, acquire, receipts, corpus-inspect, co
 
 #### `interface:ui` — Research UI (sibling cuneiform-ui)
 
-Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui at 4dcc416, pinned to backend 057a0b7 (Q-023, writer-tested; the accepted pilot pin was 63f4221), with an isolated, authenticated FalkorDB behind bounded query templates. Serves the full eligible eBL snapshot with a labelled bounded per-request check. Not end-to-end SPEC.
+Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui at 4dcc416, pinned to backend 057a0b7 (Q-023 independently accepted by reviews/full-corpus-review-v0.1.md; pilot pin was 63f4221), with an isolated, authenticated FalkorDB behind bounded query templates. Serves the full eligible eBL snapshot with a labelled bounded per-request check. Not end-to-end SPEC.
 
 - **Notes:** This checker resolves files under this repository only, so the UI is cited by commit. It consumes the read-only lookup/trace surface and these model IDs (Q-008). Every snapshot read goes through storage.verified(store_path(…), ledger='require'), and PublicationError states fail closed (typed state, 409 on a per-request refusal). The UI reads no cohort store, so v0.3 N2 does not apply. Open, not pilot blockers: the legacy-incident IDs ce127437 and 84971360 are served with the incident banner; 5e51403b has no FalkorDB projection yet; images, full corpus, MCP, temporal implementation and source rights stay open.
 - **External:** `../cuneiform-ui` at `4dcc416` · Q-023 writer (UNVERIFIED, not independent): sibling commits 2be365e and 4dcc416 pin backend 057a0b7 (PIN_COMMIT and TESTED_COMMITS; 63f4221 kept as the rollback pin). Live on 127.0.0.1:8740: 7/7 snapshots ready; snapshot:965aa262... served with the bounded per-request check (stat fingerprint, manifest bytes, ledger; full payload re-hash at discovery and hourly), index motifs ABZ480 ABZ13 = 7,170, ina ? ana = 359, DIS ina = 4,657 with graph parity, parent byte trace verified; stale 409, foreign Host 421, Cypher 403, FalkorDB load of the full snapshot refused (5.3M nodes > 150k cap). UI suite 44 tests OK with 24 isolation checks ok. Evidence: scratch/q023-full-import/evidence/live-check-4dcc416.json. · review: Accepted for the local read-only pilot by the integration review (reviews/pilot-integration-review-v0.1.md, committed in 2d746f7; Q-008), which also closed the Q-006 follow-ups (N-1 to N-7 and the re-pin to 63f4221). Earlier: re-review 05cfcd7b (sibling reviews/ui-review-v0.2.md) at ca4b514. Acceptance rule for later runs: 42 OK with 0 skipped, because low-disk fixture imports skip rather than fail (review §8, P1). The UI suite runs in the sibling, so it is not a verification_runs entry here (code_ref must resolve in this repository); verified stays none. Q-023 re-pin to 057a0b7 is writer-tested only; an independent reviewer must accept it before it counts as accepted.
