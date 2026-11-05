@@ -233,3 +233,63 @@ Backend fix worker, baseline `94af111`. Dispositions: [docs/CORPUS-REVIEW-v0.2-D
 - R1 fixed: store membership comes from the lexical and the resolved parent. Symlinked or escaping entries and payload symlinks are refused. `store_path`/`resolve_snapshot` reads are `ledger='require'` and bound to their ID. R2 fixed: cohort reads, audit and import are ledger-checked, and explicit cohort recovery and adoption are available. R3 fixed: a writer waits on the build lock and decides again; recovery holds the build lock; cohort builds hold a build lock. R4 and R5 fixed (R5: `fsync_dir` unchanged).
 - Tests: `CUNEIFORM_RUN_DISK_TESTS=1 …/python -B -m unittest discover -s tests -v` → `Ran 70 tests … OK` (59 existing + 11 new in `tests/test_store_reads.py`, 0 skipped). The same 70 in reverse order also pass. The 11 new tests all fail at `94af111` (negative control). The reviewer's `symlink_swap.py`, `symlink_other_id.py` and `cohort_uncommitted.py` show every case refused.
 - Real store: read-only. All 6 IDs verify with their unchanged labels. The 3 cohorts audit as `unledgered-pre-ledger-cohort-store`. The fingerprint (266 entries) is identical before and after, and the ledger SHA-256 is still `6d359b74…`. Building any new cohort in the real store creates the cohort ledger; the three older cohorts then need an explicit owner adoption.
+
+## Q-023 full eligible eBL import — implementation handoff (2026-11-05)
+
+Full-import implementation sub-agent, sole writer and sole QUEUE writer for Q-023 (parent grant), base `7a7baf3`. This is writer evidence; an independent reviewer decides acceptance. Evidence files: `~/.local/share/cuneiform-research/scratch/q023-full-import/{evidence,logs}/` (index in its `INDEX.md`).
+
+**Model IDs affected:** `artifact:cohort-manifest` (format `cohort-2`: `excluded_records`, `corpus.accounting`), `value:snapshot-scope` (kind `all eligible records of a fixed release`, label `FULL ELIGIBLE …`), `query:lookup` (bounded, partition-first reads; `SCOPES_SQL`), `table:projection_registry` (FULL preset 12M / 80M; hard caps raised to match), `interface:cli` (`--max-total-gib`, `--reserve-gib`, `corpus-select --all-eligible`, `corpus-accounting`, `corpus-import --projections/--memory`), `interface:ui` (sibling). No schema, parser, projection-revision or manifest-key change; snapshot contract stays `manifest-3`.
+
+### Result
+
+`snapshot:965aa26214dc0388dd3af1be367d2acc` (manifest `44a20685…`, ledger format 2 reserve+commit 2026-11-05T10:19:55Z) holds **every record of the fixed eBL release** Zenodo 10018951 `fragments.json` (73,854,507 B, MD5 `71538e2d…`, sha256 `4e970d87…`, receipt `receipt:66b5c944…`) that is eligible under `usable-text-v1`, from `cohort:4e532850276b7960e67f149f6463afcf`:
+
+| Accounting (independently recounted by a fresh streaming pass) | Records |
+|---|---|
+| Parent records | 23,289 |
+| Members (eligible, imported, 0 adapter rejections) | 20,896 |
+| Excluded: fewer eligible reading/sign positions than threshold | 2,171 |
+| Excluded: fewer adjacent eligible pairs than threshold | 154 |
+| Excluded: no numbered ATF text line | 66 |
+| Excluded: duplicate source key in parent (both K.5808 copies) | 2 |
+
+Every parent index is exactly one member or one excluded record (`accounting.status = complete-partition`); excluded records keep pointer, byte range, record sha256 and reason, and verification re-reads each excluded slice from the parent. The parent raw object is retained unchanged in `raw/sha256/`.
+
+Counts: occurrence 4,542,153; edge 12,167,645; ngram 12,292,380; posting 2,883,814; line 629,335; sequence_version 41,792; translation_segment 23,984 (all `unresolved-span`); exclusion (unsupported-position records) 1,051,657; claim 16,735; sign_type 649; word_token/lemma/sense 0 (absent from the export).
+
+### Staged qualification (1k → 5k → full), same code and FULL preset
+
+Stages 1k and 5k ran in a scratch root (`scratch/q023-full-import/stage-root`, own ledgers, never served); full ran in the real store. DuckDB memory cap 8 GB (stages) / 16 GB (full), spill disabled. Peak RSS from `/usr/bin/time -l`.
+
+| Stage | Positions | n-grams | Import | Peak RSS | Peak stage | Retained |
+|---|---|---|---|---|---|---|
+| 1,000 | 231,480 | 628,905 | 43.6 s | 0.87 GB | 0.69 GB | 0.51 GB |
+| 5,000 | 1,099,968 | 2,989,080 | 214.8 s | 2.55 GB | 3.32 GB | 2.36 GB |
+| 20,896 (full) | 4,542,153 | 12,292,380 | 1,253.5 s (ingest 482, validate 7, projections 593, Parquet 27) + select 95 s | 6.25 GB | 13.80 GB | 9.64 GB |
+
+Checks at every stage (`scripts/full_import_stage.py check`, all `ok: true`): record accounting and member-key equality; ID uniqueness in all 21 ID tables and the `nodes` view; Parquet = table row count and order-independent row hash for all 22 tables; 20 parent-file byte traces stratified by kind (full: 20/20 `verified`, 8 through `\uXXXX` escapes such as `DIŠ` → `DIŠ`, `ša₂` → `ša₂`, 5 unsupported-grammar tokens such as `{iti}BARA₂`, `AN-e`, `[...]-ri`, plus gaps and derived signs); 14 stratified motifs (top / median / rarest bigram and trigram per field, plus wildcards) with graph = array = index = index rerun (full: e.g. `ABZ411 ABZ411` 29,166; `DIŠ ina` 4,657; `ABZ115 ? ABZ597` 1,081; `ina ? ana` 359; rare cases 1); subset comparison with the 300-record snapshot `84971360…`: all 300 records present, per-record position and n-gram counts equal, whole-snapshot motif counts larger (`ABZ480 ABZ13` 201 → 7,170) as expected for a superset. Full check: 219 s, 5.06 GB peak RSS, verification of the 9.5 GB snapshot 5.3 s.
+
+Interruption (scratch, 1,500-record cohort, `scripts/full_import_interrupt.py`): SIGKILL at 12 s (ingestion) and 60 s (after ingestion) left one orphan `.pending-*` stage each, no ledger record, no torn tail, every other snapshot verified; the rerun built normally and `publication-clean-stage` removed both orphans. The mid-build free-space guard and every accounting defect are unit-tested (`tests/test_full_import.py`).
+
+Root-caused failures: (1) at 5k, interactive lookups (`occurrence`, `postings`, `span`, report scopes) hit the UI's 256 MB DuckDB bound because they filtered `ordered_position` by a non-partition column, so its `row_number()` window ran over every position first; they now resolve `sequence_id` first (pushed below the window) or page posting rows before joining positions. Same rows: `test_partition_first_lookups_equal_the_original_window_filtered_sql`. (2) After the import the 5 GiB default admission refused all 29 disk tests (root 14.4 GB); the default stays, and `CUNEIFORM_TEST_MAX_TOTAL_GIB` names an explicit budget. (3) My first 1k parity check selected only wildcard cases (a NULL-handling filter bug in the harness); fixed and the harness now refuses fewer than 10 cases.
+
+### Prerequisites done
+
+- Pre-ledger cohorts `cohort:4e86952e…`, `cohort:9abad6ce…`, `cohort:ea91baae…` independently re-checked (`scripts/q023_adopt_precheck.py`: manifest digest, cohort-1 identity, payload hash, 300/30/51 member slices equal to parent bytes, cohort manifest byte-identical to each bound snapshot `cohort.json`), then adopted (`publication-adopt --store cohorts`). Before/after fingerprint of `derived/cohorts`: every prior file identical (size, mtime, mode, sha256); only the new ledger and lock appeared. Receipts: `evidence/adopt-*.json`.
+- The six earlier snapshots were not touched: the snapshot-store fingerprint (172 entries) is identical except the ledger, whose first bytes still hash to `6d359b74…` with exactly two appended lines (reserve, commit of `965aa262…`).
+
+### Resources
+
+Disk: runtime root 1.1 GiB at start → 13.45 GiB now (full snapshot 9.0 GiB, its cohort 94 MB, scratch stages 3.4 GiB); peak during the full build about 17 GiB above start; free space never below 190 GiB (budget 40 GiB additional, ≥30 GiB free). CPU: single-threaded build. No downloads, images, embeddings, paid inference or public services.
+
+### Workbench (sibling `cuneiform-ui` `2be365e`, `4dcc416`, pin `057a0b7`)
+
+Live on 127.0.0.1:8740 (restarted UI process only; FalkorDB containers untouched): 7/7 snapshots ready, the full one labelled `FULL ELIGIBLE 20,896/23,289 · ebl-zenodo-10018951-fragments.json`. Snapshots above 2 GiB are re-hashed in full at discovery and hourly; each request checks every file's stat fingerprint, the `manifest.json` bytes and the ledger (labelled `bounded-per-request`). Large snapshots get a 512 MB per-request DuckDB bound (graph traversal needs it). Latency on the full release, server end to end: index motif 340–430 ms without parity, 1.3–2.7 s with the graph parity add-on (parity equal on all three probes); graph engine 2.4 s; postings `ABZ579` (91,000) 121 ms; report 0.64 s; occurrence + backend parent trace 6.2 s (the backend trace re-hashes 9.5 GB itself). Stale version 409, foreign Host 421, Cypher 403, FalkorDB load of the full snapshot refused (5.3M nodes > 150k cap). UI suite: 24 isolation checks ok, 44 tests OK, 0 skipped. Rollback: `git -C cuneiform-ui revert 4dcc416 2be365e`, `bin/cuneiform-ui ui-stop && bin/cuneiform-ui ui-start` (the 63f4221 pin export is still present).
+
+### Tests and checker
+
+`057a0b7` clean export: in-memory 75 OK (skipped=30); `CUNEIFORM_TEST_MAX_TOTAL_GIB=41 CUNEIFORM_RUN_DISK_TESTS=1` 75 OK, 0 skipped, 44.8 s. Atlas revision 6: `check` OK, `--runtime` OK, `--self-test` 65/65. Both runs are recorded `read_back: false` (implementer-reported).
+
+### Limitations
+
+Similarity: the full indexes (postings, 2–5-gram windows, graph edges) are the input a similarity method would need, but no similarity algorithm exists or is claimed. FalkorDB cannot hold the full graph under the UI caps; canonical DuckDB + Parquet and bounded DuckDB neighborhoods are the full-scale graph surface. Per-request verification of the full snapshot is stat + manifest + ledger, not a payload re-hash (a write that keeps size, mtime, inode and ctime would be caught only by the hourly re-hash). Parser limits are unchanged (conservative-3: hyphenated words, determinatives, compounds and numerals block; strict policy is 0 because the export never asserts intact+certain). Counts are frequencies of represented positions in eligible records, not linguistic completeness. ORACC is only ccpo (51 texts) and CDLI only the 51-record catalog crosswalk; neither collection is imported in full. eBL rights conflict (CC BY 4.0 vs CC BY-NC-SA 4.0) is unresolved and the restrictive notice is kept. Scope note cosmetic: a cohort with no exclusions prints `0 excluded ()`.

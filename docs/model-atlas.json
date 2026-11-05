@@ -1,8 +1,8 @@
 {
   "atlas_schema": "cuneiform-model-atlas/1",
-  "atlas_revision": 5,
-  "updated": "2026-11-03",
-  "baseline_commit": "63f4221",
+  "atlas_revision": 6,
+  "updated": "2026-11-05",
+  "baseline_commit": "057a0b7",
   "canonical_rule": "docs/model-atlas.json is the single canonical machine model. docs/MODEL-ATLAS.md (generated block) and docs/model-atlas.html (embedded data block) are regenerated from it by scripts/check_model_atlas.py --write and drift-checked by --check. Code is the authority for what is implemented; the checker fails when the atlas and code disagree.",
   "versions": {
     "schema": "2",
@@ -665,6 +665,8 @@
         "Q-005"
       ],
       "verified_by": [
+        "q023-writer-disk-057a0b7",
+        "q023-writer-inmemory-057a0b7",
         "review-v03-disk-63f4221",
         "q021-disk-63f4221",
         "backend-q022-disk-63f4221",
@@ -718,6 +720,8 @@
       "coverage": "Seven rows at 63f4221 (read by the atlas worker; ledger SHA-256 6d359b74… is unchanged since 94af111): five legacy rows backfilled at ~09:59Z (two carry the incident note) and one reserve plus one commit for snapshot:5e51403b at 10:36:22Z. Readers label the five ledgered-legacy-backfilled; their published_at is the manifest build time copied by the backfill, and their manifest.json file bytes are not bound (canonical digest only). derived/cohorts has no ledger or lock yet: its three cohorts read as unledgered-pre-ledger-cohort-store. Building any new cohort there creates the cohort ledger, after which those three are refused until the owner adopts them (writer statement, not done). Rows are file entries, not table rows, so populated stays none.",
       "uncertainty": "Q-005 blockers at d6049e2: B1 crash window after the rename allowed a same-ID republish; B2 reads never consulted the ledger; B3 failed-publish cleanup masked the error. Q-020 (reviews/corpus-pilot-review-v0.2.md) closed B1 and B3 at 94af111 and kept B2 open on its R1 (a symlinked store entry served as standalone-not-ledger-checked), with R2 (cohort reads), R3 (reserve->commit window), R4 (untyped absent entries) and R5 (seal fsync order). Accepted at 63f4221 for the authorized local cooperating-writer pilot by the independent final review (reviews/corpus-pilot-review-v0.3.md, review c5df3251): R1-R5 closed. Not proven beyond that scope. Writer changes: store membership from the lexical and resolved parent; symlinked or escaping entries, payload symlinks and misplaced IDs refused with symlinked-entry or misplaced before hashing; StoreEntry reads always ledger=require with expected_sid; a writer that finds reserved waits on the per-ID build lock; typed refusals for absent entries; seal fsyncs after the final modes. fsync_dir still ignores OSError. Limits stated by the protocol: cooperating writers on one host; same-owner edits, ledger deletion and root are not prevented; symlink checks are time-of-read; the ledger is not a signature. Open, non-blocking (v0.3 §9): N1 a reader refusal inside a live reserve window says the writer is gone (wording; the read still fails closed); N2 API cohort reads default to auto and label pre-ledger cohorts standalone (wording); N3 publication-clean-stage is guarded by age only. Not tested: same-owner tampering, root, multi-host, real power loss (crashes are process kills).",
       "verified_by": [
+        "q023-writer-disk-057a0b7",
+        "q023-writer-inmemory-057a0b7",
         "review-v03-disk-63f4221",
         "q021-disk-63f4221",
         "backend-q022-disk-63f4221",
@@ -799,7 +803,7 @@
       "kind": "artifact",
       "domain": "provenance",
       "label": "eBL cohort manifest (cohort.json)",
-      "summary": "Deterministic rule-selected cohort (usable-text-v1, order sha256(parent_sha256 + ':' + _id)) with byte-identical parent slices, exclusion accounting and a self-hash. Bound into ebl-cohort snapshots by hash.",
+      "summary": "Deterministic rule-selected cohort (usable-text-v1, order sha256(parent_sha256 + ':' + _id)) with byte-identical parent slices, exclusion accounting and a self-hash. Format cohort-2 (Q-023) also lists every excluded parent record (index, pointer, byte range, record sha256, key, reason); corpus.accounting() proves members + exclusions partition the parent (all-eligible cohorts: exactly the eligible records). cohort-1 manifests still verify (identity uses the manifest's own format). Bound into ebl-cohort snapshots by hash.",
       "status": {
         "modeled": "documented",
         "implemented": "code",
@@ -811,7 +815,8 @@
           "cuneiform/corpus.py::build_cohort",
           "cuneiform/corpus.py::iter_array",
           "cuneiform/corpus.py::verify_cohort",
-          "cuneiform/storage.py::import_cohort"
+          "cuneiform/storage.py::import_cohort",
+          "cuneiform/corpus.py::accounting"
         ],
         "files": [
           "cuneiform/corpus.py",
@@ -819,8 +824,10 @@
         ]
       },
       "scope": "A cohort is a filtered, hash-ordered sample (20,896 of 23,289 records eligible), not representative corpus statistics.",
-      "coverage": "Three cohorts: 30, 300 and the 51-record eBL∩ccpo P-number cohort (SOURCE-AUDIT). They predate the cohort ledger: derived/cohorts has no ledger or lock, so reads label them unledgered-pre-ledger-cohort-store (ledger='store') and require-mode reads refuse them. New cohorts are ledgered there and sealed read-only.",
+      "coverage": "Four cohorts in the real store: 30, 300 and the 51-record eBL∩ccpo cohort (cohort-1, adopted into the new cohort ledger on 2026-11-05 after an independent byte check, scratch/q023-full-import/evidence/adopt-before.json; payload bytes unchanged) and the all-eligible cohort:4e532850... (cohort-2, 20,896 members + 2,393 excluded = 23,289). Scratch-only stage cohorts (1,000, 1,500, 5,000) live in scratch/q023-full-import/stage-root.",
       "verified_by": [
+        "q023-writer-disk-057a0b7",
+        "q023-writer-inmemory-057a0b7",
         "review-v03-disk-63f4221",
         "q021-disk-63f4221",
         "backend-q022-disk-63f4221",
@@ -834,7 +841,9 @@
         "tests/test_store_reads.py::test_kill_after_rename_cohort_refused_then_recovered_with_byte_binding",
         "tests/test_store_reads.py::test_kill_after_reserve_cohort_complete_and_discard",
         "tests/test_store_reads.py::test_unrecorded_symlinked_misplaced_and_pre_ledger_cohorts",
-        "tests/test_store_reads.py::test_concurrent_cohort_builders_build_once"
+        "tests/test_store_reads.py::test_concurrent_cohort_builders_build_once",
+        "tests/test_full_import.py::test_complete_partition_and_every_defect",
+        "tests/test_full_import.py::test_all_eligible_cohort_accounts_for_every_parent_record_and_labels_scope"
       ],
       "sources": [
         "docs/SOURCE-AUDIT.md",
@@ -844,9 +853,10 @@
         "Q-005",
         "Q-012",
         "Q-020",
-        "Q-022"
+        "Q-022",
+        "Q-023"
       ],
-      "uncertainty": "Q-020 R2 (cohort reads not ledger-bound, no cohort recovery path). At 63f4221 the writer made verify_cohort(dir, parent, ledger=auto|store|require|skip) ledger-checked; corpus-audit and corpus-import read with ledger='store', import_cohort checks before building, build_cohort holds a per-ID build lock, and publication-* --store cohorts is the explicit recovery and adoption path. Accepted at 63f4221 for the authorized local cooperating-writer pilot by the independent final review (reviews/corpus-pilot-review-v0.3.md, review c5df3251): R1-R5 closed. Not proven beyond that scope. Each snapshot binds its own cohort.json by hash, which remains the authoritative copy. Prerequisite before any future cohort build in the real store: the owner must explicitly adopt cohort-4e86952e…, cohort-9abad6ce… and cohort-ea91baae… (publication-adopt --store cohorts). A build creates the cohort ledger, after which unadopted cohorts are refused. Not done; no cohort was built (v0.3 §7, §11; parent).",
+      "uncertainty": "Q-020 R2 (cohort reads not ledger-bound, no cohort recovery path). At 63f4221 the writer made verify_cohort(dir, parent, ledger=auto|store|require|skip) ledger-checked; corpus-audit and corpus-import read with ledger='store', import_cohort checks before building, build_cohort holds a per-ID build lock, and publication-* --store cohorts is the explicit recovery and adoption path. Accepted at 63f4221 for the authorized local cooperating-writer pilot by the independent final review (reviews/corpus-pilot-review-v0.3.md, review c5df3251): R1-R5 closed. Not proven beyond that scope. Each snapshot binds its own cohort.json by hash, which remains the authoritative copy. Prerequisite before any future cohort build in the real store: the owner must explicitly adopt cohort-4e86952e…, cohort-9abad6ce… and cohort-ea91baae… (publication-adopt --store cohorts). A build creates the cohort ledger, after which unadopted cohorts are refused. Not done; no cohort was built (v0.3 §7, §11; parent). Q-023 (writer, UNVERIFIED): the three pre-ledger cohorts were adopted with publication-adopt --store cohorts after each manifest digest, identity, payload hash, every member slice against the parent and the bound snapshot cohort.json were re-checked; cohort-2 and accounting() await the independent Q-023 review.",
       "reviewed_by": [
         "reviews/corpus-pilot-review-v0.3.md"
       ]
@@ -2661,7 +2671,7 @@
       "kind": "table",
       "domain": "patterns",
       "label": "projection_registry",
-      "summary": "Revision, configuration, source-binding hash, canonical-table hash and asset inventory of the current derived projection; stale detection.",
+      "summary": "Revision, configuration, source-binding hash, canonical-table hash and asset inventory of the current derived projection; stale detection. Configuration ceilings: defaults 20,000 positions / 100,000 rows; CORPUS preset 2M / 20M; FULL preset (Q-023) 12M / 80M, equal to the raised hard caps. Ceilings are part of the projection spec and so of the snapshot ID.",
       "status": {
         "modeled": "documented",
         "implemented": "code",
@@ -2716,7 +2726,9 @@
       "sources": [
         "docs/REPRESENTATION-MAP.md"
       ],
-      "queue": [],
+      "queue": [
+        "Q-023"
+      ],
       "corpus_evidence": [
         {
           "snapshot_id": "snapshot:c316e7cbbaf8a7fca7705f0efa5c4a07",
@@ -2812,7 +2824,7 @@
       "kind": "query",
       "domain": "patterns",
       "label": "Bounded lookup recipes",
-      "summary": "Named recipes: postings, motifs, span, sequence, occurrence, reverse-postings, reverse-motifs, aliases, catalog, translations, neighbors, nodes, words and lemmas. Default 20 / max 100 rows with truncation and next_offset. Lookups on a persisted snapshot also return its scope (value:snapshot-scope).",
+      "summary": "Named recipes: postings, motifs, span, sequence, occurrence, reverse-postings, reverse-motifs, aliases, catalog, translations, neighbors, nodes, words and lemmas. Default 20 / max 100 rows with truncation and next_offset. Lookups on a persisted snapshot also return its scope (value:snapshot-scope). Q-023: occurrence, span, postings and scope reads never filter the ordered_position window by a non-partition column (that computed the window for every position: OOM at 256 MB on 5,000 records); they resolve sequence_id first or page posting rows before joining positions. Same rows (regression test against the original SQL).",
       "status": {
         "modeled": "documented",
         "implemented": "code",
@@ -2827,7 +2839,8 @@
           "cuneiform/projections.py::coverage",
           "cuneiform/projections.py::lookup",
           "cuneiform/projections.py::report",
-          "cuneiform/projections.py::source_span"
+          "cuneiform/projections.py::source_span",
+          "cuneiform/projections.py::SCOPES_SQL"
         ],
         "files": [
           "cuneiform/projections.py",
@@ -2839,7 +2852,8 @@
         "tests/test_projections.py::test_trace_and_reverse_navigation",
         "tests/test_projections.py::test_caps_configuration_and_atomic_failure",
         "tests/test_corpus_pilot.py::test_words_lemmas_senses_and_claims_without_invented_translation",
-        "tests/test_publication.py::test_lookup_verifies_once_labels_latency_and_types_errors"
+        "tests/test_publication.py::test_lookup_verifies_once_labels_latency_and_types_errors",
+        "tests/test_full_import.py::test_partition_first_lookups_equal_the_original_window_filtered_sql"
       ],
       "sources": [
         "docs/REPRESENTATION-MAP.md"
@@ -2847,7 +2861,8 @@
       "queue": [
         "Q-008",
         "Q-010",
-        "Q-005"
+        "Q-005",
+        "Q-023"
       ],
       "notes": "Candidate backing for MCP read tools and the UI. Since 94af111: persisted.ScopeMismatch for a namespace/snapshot override that cannot match; persisted.LayerUnavailable when the layer table is empty (an empty table means the layer is unavailable, never zero); a loaded layer with no match returns rows []. Each call verifies the snapshot once; latency_ms is query-only (latency_scope) and timing adds verify_ms, query_ms and end_to_end_ms. At 63f4221 lookup_snapshot, query.connect and query.trace refuse a symlinked store entry (symlinked-entry) on both the plain path and the StoreEntry (writer-tested)."
     },
@@ -2894,7 +2909,7 @@
       "kind": "value",
       "domain": "patterns",
       "label": "Snapshot scope",
-      "summary": "Returned with every persisted lookup: scope kind (single input, rule-selected cohort, selection), cohort size and eligible/parent denominators, so counts are never read as corpus-wide statistics.",
+      "summary": "Returned with every persisted lookup: scope kind (single input, rule-selected cohort, selection, or all eligible records of a fixed release), cohort size and eligible/parent denominators, so counts are never read as corpus-wide statistics. The all-eligible kind (Q-023) names the fixed release, the eligible count, every exclusion reason, the per-record accounting and the conservative-parse caveat (not linguistic completeness).",
       "status": {
         "modeled": "documented",
         "implemented": "code",
@@ -2911,14 +2926,16 @@
       },
       "notes": "Derived from the manifest, not rows. For the 300 cohort: 'rule-selected cohort', 300 of 20,896 eligible, 23,289 parent records. Since 94af111 scope also reports publication (the ledger label), identity_formula and input_identity (the contract-independent legacy-formula ID of the inputs, for grouping a legacy snapshot with a manifest-3 rebuild without merging them; ORACC pairs differ because the adapter is part of the selection ID).",
       "evidence": [
-        "tests/test_corpus_pilot.py::test_snapshots_verify_parity_and_traces"
+        "tests/test_corpus_pilot.py::test_snapshots_verify_parity_and_traces",
+        "tests/test_full_import.py::test_all_eligible_cohort_accounts_for_every_parent_record_and_labels_scope"
       ],
       "sources": [
         "CHECKPOINT.md"
       ],
       "queue": [
         "Q-005",
-        "Q-008"
+        "Q-008",
+        "Q-023"
       ]
     },
     {
@@ -4040,6 +4057,8 @@
       ],
       "notes": "Manifest value, not rows. Disk level rests on the corpus worker's UNVERIFIED d6049e2 run (historically the parent's 2ab620b run).",
       "verified_by": [
+        "q023-writer-disk-057a0b7",
+        "q023-writer-inmemory-057a0b7",
         "review-v03-disk-63f4221",
         "q021-disk-63f4221",
         "backend-q022-disk-63f4221",
@@ -4943,7 +4962,7 @@
       "kind": "interface",
       "domain": "interfaces",
       "label": "CLI (python -m cuneiform)",
-      "summary": "python -m cuneiform: demo, explore, fetch, acquire, receipts, corpus-inspect, corpus-select, corpus-audit, corpus-import, snapshots, publication-status, publication-recover, publication-adopt, publication-repair-ledger, publication-clean-stage, scope, manifest, lookup, query, parity, trace, trace-word, export-graph, catalog-link, cdli-import, oracc-inspect, oracc-import.",
+      "summary": "python -m cuneiform: demo, explore, fetch, acquire, receipts, corpus-inspect, corpus-select (--all-eligible), corpus-audit, corpus-accounting, corpus-import (--projections corpus|full, --memory), snapshots, publication-status, publication-recover, publication-adopt, publication-repair-ledger, publication-clean-stage, scope, manifest, lookup, query, parity, trace, trace-word, export-graph, catalog-link, cdli-import, oracc-inspect, oracc-import. Global --max-total-gib / --reserve-gib set an explicit task budget (defaults 5 / 10 GiB unchanged).",
       "status": {
         "modeled": "documented",
         "implemented": "code",
@@ -4968,7 +4987,8 @@
       "queue": [
         "Q-005",
         "Q-020",
-        "Q-022"
+        "Q-022",
+        "Q-023"
       ],
       "notes": "Read verbs resolve snapshots through storage.store_path, which at 63f4221 returns a ledger-required StoreEntry and refuses symlinked or misplaced entries (exit 2, writer-tested). The publication-* verbs are the only recovery path; nothing is automatic (docs/PUBLICATION-PROTOCOL.md). Since 63f4221 they take --store {snapshots,cohorts}; publication-status adds store, symlinked_entries and a per-row id; corpus-audit JSON adds publication. Verb list read from cuneiform/cli.py at 63f4221 by the atlas worker (unchanged from 94af111)."
     },
@@ -4977,7 +4997,7 @@
       "kind": "interface",
       "domain": "interfaces",
       "label": "Research UI (sibling cuneiform-ui)",
-      "summary": "Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui at f68f340, pinned to the accepted backend 63f4221, with an isolated, authenticated FalkorDB behind bounded query templates. Local read-only pilot accepted against 63f4221 (reviews/pilot-integration-review-v0.1.md); not end-to-end SPEC.",
+      "summary": "Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui at 4dcc416, pinned to backend 057a0b7 (Q-023, writer-tested; the accepted pilot pin was 63f4221), with an isolated, authenticated FalkorDB behind bounded query templates. Serves the full eligible eBL snapshot with a labelled bounded per-request check. Not end-to-end SPEC.",
       "status": {
         "modeled": "documented",
         "implemented": "code",
@@ -4987,9 +5007,9 @@
       "implementation": {
         "external": {
           "repo": "../cuneiform-ui",
-          "commit": "f68f340",
-          "observed": "Integration reviewer (independent of the UI writer, task 1359e965, and of the atlas and backend workers), reviews/pilot-integration-review-v0.1.md: live server on 127.0.0.1:8740 reports backend 63f42216… as tested with no problems; the pin export is byte-identical to git archive 63f4221 (22 code files) and read-only; 6/6 snapshots ready, each live version equal to the backend's verified(…, ledger='require') manifest_sha256; ORACC 5e51403b carries the word's own IN_SENSE sig on 4,508 of 4,544 links (edaab55c: 0) and edaab55c is labelled superseded for sense provenance; cohort 300 ABZ480 ABZ13 gives 201 with index/graph parity, original-source spans re-read from the raw parent; stale version 409, arbitrary Cypher 403, foreign Host 421, foreign Origin 403; refresh keeps the selection (N-1). The reviewer ran the UI suite: 24/24 isolation checks ok and 42 tests OK, 0 skipped. Real store fingerprint unchanged. This atlas worker read back only the sibling git: f68f340 is HEAD of a clean main, and bin/cuneiform-ui PIN_COMMIT and server/bridge.py TESTED_COMMITS are both 63f42216243141f4b10cdfd3d7ddd514c85b63d7.",
-          "review": "Accepted for the local read-only pilot by the integration review (reviews/pilot-integration-review-v0.1.md, committed in 2d746f7; Q-008), which also closed the Q-006 follow-ups (N-1 to N-7 and the re-pin to 63f4221). Earlier: re-review 05cfcd7b (sibling reviews/ui-review-v0.2.md) at ca4b514. Acceptance rule for later runs: 42 OK with 0 skipped, because low-disk fixture imports skip rather than fail (review §8, P1). The UI suite runs in the sibling, so it is not a verification_runs entry here (code_ref must resolve in this repository); verified stays none."
+          "commit": "4dcc416",
+          "observed": "Q-023 writer (UNVERIFIED, not independent): sibling commits 2be365e and 4dcc416 pin backend 057a0b7 (PIN_COMMIT and TESTED_COMMITS; 63f4221 kept as the rollback pin). Live on 127.0.0.1:8740: 7/7 snapshots ready; snapshot:965aa262... served with the bounded per-request check (stat fingerprint, manifest bytes, ledger; full payload re-hash at discovery and hourly), index motifs ABZ480 ABZ13 = 7,170, ina ? ana = 359, DIS ina = 4,657 with graph parity, parent byte trace verified; stale 409, foreign Host 421, Cypher 403, FalkorDB load of the full snapshot refused (5.3M nodes > 150k cap). UI suite 44 tests OK with 24 isolation checks ok. Evidence: scratch/q023-full-import/evidence/live-check-4dcc416.json.",
+          "review": "Accepted for the local read-only pilot by the integration review (reviews/pilot-integration-review-v0.1.md, committed in 2d746f7; Q-008), which also closed the Q-006 follow-ups (N-1 to N-7 and the re-pin to 63f4221). Earlier: re-review 05cfcd7b (sibling reviews/ui-review-v0.2.md) at ca4b514. Acceptance rule for later runs: 42 OK with 0 skipped, because low-disk fixture imports skip rather than fail (review §8, P1). The UI suite runs in the sibling, so it is not a verification_runs entry here (code_ref must resolve in this repository); verified stays none. Q-023 re-pin to 057a0b7 is writer-tested only; an independent reviewer must accept it before it counts as accepted."
         }
       },
       "notes": "This checker resolves files under this repository only, so the UI is cited by commit. It consumes the read-only lookup/trace surface and these model IDs (Q-008). Every snapshot read goes through storage.verified(store_path(…), ledger='require'), and PublicationError states fail closed (typed state, 409 on a per-request refusal). The UI reads no cohort store, so v0.3 N2 does not apply. Open, not pilot blockers: the legacy-incident IDs ce127437 and 84971360 are served with the incident banner; 5e51403b has no FalkorDB projection yet; images, full corpus, MCP, temporal implementation and source rights stay open.",
@@ -5001,7 +5021,8 @@
       "queue": [
         "Q-002",
         "Q-006",
-        "Q-008"
+        "Q-008",
+        "Q-023"
       ]
     }
   ],
@@ -5161,6 +5182,30 @@
       "command": "CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests -v (clean git archive export of 63f4221), plus reversed order and the 11 store-read tests one by one",
       "result": "Ran 70 tests in 40.787s, OK, 0 skipped; reversed 70 OK, 0 skipped; 11/11 isolated OK. Real-store fingerprint 266 entries, 0 differences; ledger SHA-256 6d359b74… unchanged.",
       "attribution": "Recorded from reviews/corpus-pilot-review-v0.3.md §8 and §7 on the parent's instruction (independent reviewer). Not re-run by the atlas worker; its own run q021-disk-63f4221 gives the same 70 OK."
+    },
+    {
+      "id": "q023-writer-inmemory-057a0b7",
+      "level": "unit",
+      "outcome": "pass",
+      "observer": "Q-023 full-import implementation sub-agent (the writer)",
+      "read_back": false,
+      "date": "2026-11-05",
+      "code_ref": "057a0b7",
+      "command": "<venv>/python -B -m unittest discover -s tests (clean git archive export of 057a0b7)",
+      "result": "Ran 75 tests in 14.5s, OK (skipped=30)",
+      "attribution": "UNVERIFIED: implementer-reported; the independent Q-023 reviewer re-runs it."
+    },
+    {
+      "id": "q023-writer-disk-057a0b7",
+      "level": "disk",
+      "outcome": "pass",
+      "observer": "Q-023 full-import implementation sub-agent (the writer)",
+      "read_back": false,
+      "date": "2026-11-05",
+      "code_ref": "057a0b7",
+      "command": "CUNEIFORM_TEST_MAX_TOTAL_GIB=41 CUNEIFORM_RUN_DISK_TESTS=1 <venv>/python -B -m unittest discover -s tests (clean git archive export of 057a0b7)",
+      "result": "Ran 75 tests in 44.8s, OK, 0 skipped (70 earlier + 5 new in tests/test_full_import.py). Without the explicit budget variable, the 29 disk tests error at admission (root 14.4 GB > default 5 GiB), by design.",
+      "attribution": "UNVERIFIED: implementer-reported; the independent Q-023 reviewer re-runs it."
     }
   ],
   "runtime_unexercised": {
@@ -5229,6 +5274,14 @@
         "reviews/corpus-pilot-review-v0.2.md",
         "reviews/corpus-pilot-review-v0.3.md"
       ]
+    },
+    "snapshot:965aa26214dc0388dd3af1be367d2acc": {
+      "status": "pending-review",
+      "source": "ebl-cohort",
+      "ledger": "ledgered",
+      "writer_commit": "5c7a01b",
+      "manifest_sha256": "44a20685b069802c46a2b9c158239ccf369c5f5f566f7267ad8a86dc298e3c84",
+      "note": "Q-023 full eligible eBL release: cohort:4e532850... (cohort-2, size=None, rule usable-text-v1), 20,896 of 23,289 parent records, 2,393 excluded with per-record reasons (2,171 / 154 / 66 / 2). Projection preset full (12M positions / 80M rows). Ledger format 2 reserve+commit 2026-11-05T10:19:55Z. Counts (writer-observed): occurrence 4,542,153; edge 12,167,645; ngram 12,292,380; posting 2,883,814; line 629,335; translation_segment 23,984; exclusion 1,051,657; claim 16,735; sign_type 649. Built by the 5c7a01b tree (build code equal to 057a0b7; 057a0b7 changed tests and lookups only). Not cited as corpus_evidence until an independent review reads it."
     }
   }
 }

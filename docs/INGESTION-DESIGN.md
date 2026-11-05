@@ -127,3 +127,7 @@ Common to every source: acquisition through `cuneiform acquire` only. It uses an
 ### Linking across sources
 
 `catalog-link KEY --snapshot …` lists, per verified snapshot, the alias claims whose object is KEY and the artifacts whose `namespace:catalog_key` is KEY. Links are candidates only. Independence is unknown, nothing is merged, and no name or label matching is used. Observed: ORACC→eBL (51/51), CDLI→eBL (51 of 54 keys inside the cohort) and eBL→CDLI P-numbers agree for every resolvable pair (SOURCE-AUDIT).
+
+### Full eligible release — cohort format `cohort-2` (Q-023, 2026-11-05)
+
+`corpus-select --all-eligible` builds a `size=None` cohort under `usable-text-v1` with no key filter. Format `cohort-2` adds `excluded_records`: for every parent record that is not a member, its parent index, pointer, byte range, record sha256, source key and the one exclusion reason. `corpus.accounting()` (run on every verification and by `corpus-accounting`) requires members and excluded records to partition the parent exactly, per-record reasons to equal `excluded_by_reason`, and eligible + excluded = parent records. Verification also re-reads every excluded slice from the parent when it is present. Cohort identity binds the manifest's own format, so `cohort-1` manifests still verify. The selector and rule are unchanged; the full release gives 20,896 members and 2,393 excluded records of 23,289 (CHECKPOINT Q-023). Import uses the `full` projection preset (12M positions / 80M rows), whose ceilings are part of the snapshot ID.
