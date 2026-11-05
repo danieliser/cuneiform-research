@@ -45,6 +45,12 @@ class Config:
         if self.used()+additional>self.max_total_bytes: raise ValueError('storage byte budget exceeded')
         if shutil.disk_usage(ancestor).free-additional<self.reserve_bytes: raise ValueError('free-space reserve would be violated')
 
+    def guard_free(self) -> None:
+        """Cheap mid-build check (no directory walk): refuse once free space falls below the reserve."""
+        ancestor=self.root
+        while not ancestor.exists(): ancestor=ancestor.parent
+        if shutil.disk_usage(ancestor).free<self.reserve_bytes: raise ValueError('free-space reserve reached during build; nothing published')
+
 
 def read_bounded(path: Path, config: Config) -> bytes:
     with path.open('rb') as handle:
@@ -264,7 +270,7 @@ def _materialize(config, sid, data, load, projections, projection_spec, meta, ex
             db.execute(Path(__file__).with_name('schema.sql').read_text())
             t=time.monotonic(); load(db,stage); timings['ingest_s']=round(time.monotonic()-t,3)
             t=time.monotonic(); validate_graph(db); timings['validate_s']=round(time.monotonic()-t,3)
-            t=time.monotonic(); build_projections(db,projections,spool_dir=stage/'spool'); timings['projections_s']=round(time.monotonic()-t,3)
+            t=time.monotonic(); build_projections(db,projections,spool_dir=stage/'spool',check=config.guard_free); timings['projections_s']=round(time.monotonic()-t,3)
             fresh=assert_fresh(db)
             meta=dict(meta,projection_registry={k:fresh[k] for k in ('id','canonical_hash','source_hash')})
             counts={}
@@ -328,6 +334,9 @@ def discard_owned_stage(config: Config, stage: Path, sid: str, exc: BaseExceptio
 
 # Corpus snapshots raise only the explicit ceilings; defaults for small imports are unchanged.
 CORPUS_PROJECTIONS = ProjectionConfig(max_positions=2_000_000, max_rows=20_000_000)
+# Full eligible release (Q-023): same fields, policies and lengths; only the ceilings differ (they are part of the ID).
+FULL_PROJECTIONS = ProjectionConfig(max_positions=12_000_000, max_rows=80_000_000)
+PROJECTION_PRESETS = {'corpus': CORPUS_PROJECTIONS, 'full': FULL_PROJECTIONS}
 
 
 def import_cohort(cohort_dir: Path, config: Config, projections: ProjectionConfig=CORPUS_PROJECTIONS, namespace: str='ebl', parent_path: Path | None=None, batch: int=200, memory: str='1GB', max_payload_bytes: int=512*MiB, cohort_ledger: str='auto') -> dict:
@@ -341,6 +350,7 @@ def import_cohort(cohort_dir: Path, config: Config, projections: ProjectionConfi
     from .corpus import verify_cohort, iter_array
     from .adapters import ingest_record
     projections.validate()
+    if not re.fullmatch(r'[1-9][0-9]{0,4}(MB|GB|MiB|GiB)',memory): raise ValueError('memory limit must look like 512MB or 8GB')
     cohort=verify_cohort(cohort_dir,parent_path,ledger=cohort_ledger)
     payload_path=cohort_dir/'payload.json'
     if payload_path.stat().st_size>max_payload_bytes: raise ValueError('cohort payload exceeds corpus import cap')
@@ -363,6 +373,7 @@ def import_cohort(cohort_dir: Path, config: Config, projections: ProjectionConfi
             pending+=1
             if pending>=batch:
                 builder.flush(); stats['batches']+=1; pending=0
+                config.guard_free()
         if pending: builder.flush(); stats['batches']+=1
     meta={'namespace':namespace,'source':source,'source_url':source_url,'record_id':record_id,'rights':cohort.get('rights') or RIGHTS['ebl'],
           'cohort':{'cohort_id':cohort['cohort_id'],'manifest_sha256':cohort['manifest_sha256'],'size':cohort['size'],'rule':cohort['rule'],'parent':cohort['parent']},

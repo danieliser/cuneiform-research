@@ -5,9 +5,10 @@ from .model import canonical, digest, identity
 
 REVISION = 'linked-1'
 OPTIONAL_TABLES = {'posting', 'ngram'}
-# Defaults stay small (20,000 / 100,000); corpus snapshots opt into these ceilings explicitly.
-HARD_MAX_POSITIONS = 2_000_000
-HARD_MAX_ROWS = 20_000_000
+# Defaults stay small (20,000 / 100,000); corpus snapshots opt into larger ceilings explicitly. The hard caps admit the
+# full eligible eBL release (Q-023: ~5.6M positions, ~20M derived rows measured by stage) with headroom.
+HARD_MAX_POSITIONS = 12_000_000
+HARD_MAX_ROWS = 80_000_000
 
 @dataclass(frozen=True)
 class ProjectionConfig:
@@ -95,8 +96,9 @@ def _lines(db, fields):
     if line: yield line
 
 
-def build(db, config=ProjectionConfig(), spool_dir=None):
-    """Replace optional projections atomically. spool_dir (import staging only) enables bulk loading."""
+def build(db, config=ProjectionConfig(), spool_dir=None, check=None):
+    """Replace optional projections atomically. spool_dir (import staging only) enables bulk loading.
+    check (import staging only) is called every 5,000 lines, e.g. to refuse when the free-space reserve is reached."""
     config.validate()
     from pathlib import Path
     from .bulk import Spool
@@ -116,7 +118,8 @@ def build(db, config=ProjectionConfig(), spool_dir=None):
     posts = Spool.detached('posting', posting_cols, spool_dir)
     grams = Spool.detached('ngram', ngram_cols, spool_dir)
     try:
-        for line in _lines(db, config.fields):
+        for number, line in enumerate(_lines(db, config.fields)):
+            if check is not None and number % 5000 == 0: check()
             for policy in config.policies:
                 def eligible(p):
                     return p['reading'] is not None and (policy=='source' or (p['preservation']=='intact' and p['certainty']=='certain'))
@@ -160,6 +163,14 @@ def build(db, config=ProjectionConfig(), spool_dir=None):
     return {'id':projection_id,'revision':REVISION,'assets':assets,'postings':posts.count if config.postings else 0,'ngrams':grams.count if config.ngrams else 0,'canonical_hash':fingerprint,'source_hash':source_hash,'config':asdict(config)}
 
 
+# Interactive lookups never filter ordered_position by a non-partition column: its row_number() window would then be
+# computed for every position in the snapshot before the filter (O(corpus) memory; Q-023 measured OOM at 256 MB on 5,000
+# records). They resolve the window's partition key (sequence_id) first and pass it as a literal, which DuckDB pushes below
+# the window, or read token_context when no window column is needed. Results are identical.
+SCOPES_SQL = ('SELECT DISTINCT r.namespace,b.snapshot_id,t.field FROM token_context t JOIN source_record r ON r.id=t.source_record_id '
+              'JOIN source_binding b ON b.source_record_id=r.id ORDER BY 1,2,3')
+
+
 def bounded(db, sql, args=(), limit=20, offset=0):
     if not 1 <= limit <= 100 or not 0 <= offset <= 100000: raise ValueError('limit 1–100; offset 0–100000')
     found = rows(db,sql+' LIMIT ? OFFSET ?',[*args,limit+1,offset])
@@ -178,7 +189,14 @@ def lookup(db, organization, value='', *, namespace=None, snapshot=None, field='
         if field not in configured['fields'] or policy not in configured['policies']:
             raise ValueError('projection scope not configured')
         if organization=='postings':
-            return bounded(db,'SELECT p.*,o.sequence_id,o.line_id,o.position,o.witness_id,o.artifact_id,o.source_record_id,o.start_byte,o.end_byte FROM posting p JOIN ordered_position o ON o.id=p.occurrence_id WHERE p.namespace=? AND p.snapshot_id=? AND p.field=? AND p.policy=? AND (p.token_id=? OR p.label=?) ORDER BY p.id',[namespace,snapshot,field,policy,value,value],limit,offset)
+            # Page the posting rows first, then fetch their positions by ID: joining the token_context view to the whole
+            # posting table builds corpus-sized hash tables (OOM at 256 MB on the full release). Same rows and order.
+            page=bounded(db,'SELECT * FROM posting p WHERE p.namespace=? AND p.snapshot_id=? AND p.field=? AND p.policy=? AND (p.token_id=? OR p.label=?) ORDER BY p.id',[namespace,snapshot,field,policy,value,value],limit,offset)
+            ids=[r['occurrence_id'] for r in page['rows']]
+            cols=('sequence_id','line_id','position','witness_id','artifact_id','source_record_id','start_byte','end_byte')
+            found={r['id']:r for r in rows(db,f"SELECT id,{','.join(cols)} FROM token_context WHERE id IN ({','.join('?'*len(ids))})",ids)} if ids else {}
+            page['rows']=[dict(r,**{c:found[r['occurrence_id']][c] for c in cols}) for r in page['rows'] if r['occurrence_id'] in found]
+            return page
         pattern=json.loads(value)
         if not isinstance(pattern,list) or not 2<=len(pattern)<=5 or not all(isinstance(v,str) for v in pattern): raise ValueError('pattern must be 2–5 strings')
         cfg=json.loads(entry['config'])
@@ -197,7 +215,6 @@ def lookup(db, organization, value='', *, namespace=None, snapshot=None, field='
         return source_span(db,span['source_record_id'],field,span['start'],span['end'],limit)
     recipes={
       'sequence': ('SELECT * FROM ordered_position WHERE sequence_id=? ORDER BY ordinal,position',[value]),
-      'occurrence': ('SELECT * FROM ordered_position WHERE id=? ORDER BY id',[value]),
       'reverse-postings': ('SELECT * FROM posting WHERE occurrence_id=? ORDER BY id',[value]),
       'reverse-motifs': ('SELECT * FROM ngram WHERE json_contains(occurrence_ids,?) ORDER BY id',[canonical(value)]),
       'aliases': ('SELECT * FROM catalog_alias WHERE object_key=? OR subject_id=? ORDER BY id',[value,value]),
@@ -218,6 +235,8 @@ def lookup(db, organization, value='', *, namespace=None, snapshot=None, field='
                      (SELECT list(s.gloss ORDER BY s.gloss) FROM sense s WHERE s.lemma_id=l.id) senses
               FROM lemma l WHERE l.id=? OR l.citation_form=? OR ?='' ORDER BY attestations DESC,l.id""",[value]*3),
     }
+    if organization=='occurrence':
+        recipes['occurrence']=('SELECT * FROM ordered_position WHERE sequence_id=? AND id=? ORDER BY id',[_sequence_of(db,value),value])
     if organization not in recipes: raise ValueError('unknown organization')
     if organization.startswith('reverse-'):
         entry=assert_fresh(db)
@@ -228,7 +247,14 @@ def lookup(db, organization, value='', *, namespace=None, snapshot=None, field='
 
 def source_span(db, source_id, field, start, end, limit=20):
     if field not in {'atf','signs'} or start<0 or end<=start: raise ValueError('invalid half-open UTF-8 span')
-    return bounded(db,'SELECT * FROM ordered_position WHERE source_record_id=? AND field=? AND start_byte<? AND end_byte>? ORDER BY ordinal,position',[source_id,field,end,start],limit)
+    seqs=[r[0] for r in db.execute('SELECT id FROM sequence_version WHERE source_record_id=? AND field=? ORDER BY id',[source_id,field]).fetchall()]
+    if not seqs: return {'rows':[],'truncated':False,'next_offset':None}
+    return bounded(db,f"SELECT * FROM ordered_position WHERE sequence_id IN ({','.join('?'*len(seqs))}) AND source_record_id=? AND field=? AND start_byte<? AND end_byte>? ORDER BY ordinal,position",[*seqs,source_id,field,end,start],limit)
+
+
+def _sequence_of(db, occurrence_id):
+    found=db.execute('SELECT sequence_id FROM token_context WHERE id=?',[occurrence_id]).fetchone()
+    return found[0] if found else None
 
 
 def coverage(db):
@@ -246,7 +272,7 @@ def coverage(db):
 def report(db):
     entry=assert_fresh(db)
     covered=coverage(db)
-    return {'coverage_total':len(covered),'coverage_truncated':len(covered)>20,'registry':entry,'scopes':rows(db,'SELECT DISTINCT namespace,snapshot_id,field FROM ordered_position ORDER BY 1,2,3'),
+    return {'coverage_total':len(covered),'coverage_truncated':len(covered)>20,'registry':entry,'scopes':rows(db,SCOPES_SQL),
             'coverage':covered[:20],'coverage_note':'Zero word/lemma counts mean unavailable, not zero linguistic words. Unresolved translations are sequence context, not aligned English evidence.',
             'nodes':db.execute('SELECT count(*) FROM nodes').fetchone()[0],
             'edges':db.execute('SELECT count(*) FROM portable_edge').fetchone()[0]}

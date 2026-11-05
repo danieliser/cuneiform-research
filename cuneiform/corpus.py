@@ -20,7 +20,9 @@ from .model import PARSER_VERSION, canonical, digest, identity
 SCANNER = 'json-array-stream-1'
 INSPECTOR = 'ebl-inspect-1'
 SELECTOR = 'ebl-cohort-select-1'
-COHORT_FORMAT = 'cohort-1'
+# cohort-2 adds per-record accounting of every excluded parent record (excluded_records); cohort-1 manifests still verify.
+COHORT_FORMAT = 'cohort-2'
+COHORT_FORMATS = ('cohort-1', 'cohort-2')
 MAX_RECORD_BYTES = 4 * 1024 * 1024
 WS = ' \t\r\n'
 
@@ -225,12 +227,16 @@ def select(path: Path, parent: dict, size: int, rule: dict = RULE_DEFAULT) -> di
     import heapq
     ids = Counter(item['value'].get('_id') for item in iter_array(path))
     duplicated = {k for k, n in ids.items() if n > 1}
-    excluded = Counter(); eligible = 0; heap: list = []
+    excluded = Counter(); eligible = 0; heap: list = []; excluded_records: list[dict] = []
     for item in iter_array(path):
         row = item['value']
         stats = record_stats(item['pointer'], row)
         reason = eligibility(stats, item, rule, row.get('_id') in duplicated)
-        if reason: excluded[reason] += 1; continue
+        if reason:
+            excluded[reason] += 1
+            excluded_records.append({'parent_index': item['index'], 'parent_pointer': item['pointer'], 'parent_start': item['start'], 'parent_end': item['end'],
+                                     'record_sha256': digest(item['raw']), 'source_key': row.get('_id'), 'reason': reason})
+            continue
         eligible += 1
         order = hashlib.sha256(f'{parent["sha256"]}:{row["_id"]}'.encode()).hexdigest()
         entry = (order, item['index'], item['pointer'], item['start'], item['end'], digest(item['raw']), row['_id'], describe(row), stats)
@@ -239,11 +245,40 @@ def select(path: Path, parent: dict, size: int, rule: dict = RULE_DEFAULT) -> di
         if size is None or len(heap) < size: heapq.heappush(heap, keyed)
         elif keyed > heap[0]: heapq.heapreplace(heap, keyed)
     chosen = sorted((e for _, _, e in heap), key=lambda e: e[0])
-    return {'eligible': eligible, 'excluded': dict(excluded.most_common()), 'parent_records': sum(ids.values()), 'chosen': chosen}
+    return {'eligible': eligible, 'excluded': dict(excluded.most_common()), 'parent_records': sum(ids.values()), 'chosen': chosen,
+            'excluded_records': excluded_records}
 
 
-def cohort_identity(parent: dict, rule: dict, size: int) -> str:
-    return identity('cohort', COHORT_FORMAT, SELECTOR, PARSER_VERSION, parent['sha256'], rule, size)
+def cohort_identity(parent: dict, rule: dict, size: int | None, fmt: str = COHORT_FORMAT) -> str:
+    if fmt not in COHORT_FORMATS: raise ValueError('unsupported cohort format')
+    return identity('cohort', fmt, SELECTOR, PARSER_VERSION, parent['sha256'], rule, size)
+
+
+def accounting(manifest: dict) -> dict:
+    """Exhaustive parent accounting of a cohort-2 manifest: every parent record is either a member or an excluded record
+    with one reason, never both and never neither (size=None, no filter: members are exactly the eligible records).
+    Raises ValueError on any gap, overlap or count disagreement. cohort-1 manifests carry only reason totals."""
+    if manifest.get('format') != 'cohort-2': return {'status': 'reason-totals-only', 'format': manifest.get('format'), 'parent_records': manifest['parent_records'],
+                                                    'eligible_records': manifest['eligible_records'], 'excluded_by_reason': manifest['excluded_by_reason'],
+                                                    'note': 'cohort-1 manifests record exclusion totals by reason, not per-record exclusions'}
+    members = [m['parent_index'] for m in manifest['records']]
+    excluded = [e['parent_index'] for e in manifest['excluded_records']]
+    n = manifest['parent_records']
+    if len(set(members)) != len(members) or len(set(excluded)) != len(excluded): raise ValueError('cohort accounting: duplicate parent index')
+    if set(members) & set(excluded): raise ValueError('cohort accounting: a parent record is both member and excluded')
+    if not all(0 <= i < n for i in members + excluded): raise ValueError('cohort accounting: parent index out of range')
+    reasons = Counter(e['reason'] for e in manifest['excluded_records'])
+    if dict(reasons) != manifest['excluded_by_reason']: raise ValueError('cohort accounting: per-record reasons disagree with reason totals')
+    if manifest['eligible_records'] + len(excluded) != n: raise ValueError('cohort accounting: eligible + excluded != parent records')
+    complete = manifest['size'] is None and manifest['rule'].get('cdli_in') is None
+    if complete and (len(members) != manifest['eligible_records'] or len(members) + len(excluded) != n):
+        raise ValueError('cohort accounting: an all-eligible cohort must hold every eligible record')
+    if manifest['size'] is not None and len(members) != manifest['size']: raise ValueError('cohort accounting: member count != size')
+    return {'status': 'complete-partition' if complete else 'members-plus-excluded', 'format': 'cohort-2', 'parent_records': n, 'members': len(members),
+            'eligible_records': manifest['eligible_records'], 'eligible_not_selected': manifest['eligible_records'] - len(members),
+            'excluded_records': len(excluded), 'excluded_by_reason': dict(reasons.most_common()),
+            'note': ('every parent record is a member or an excluded record with its reason' if complete else
+                     'members and per-record exclusions; eligible records outside the selected size are counted, not listed')}
 
 
 COHORT_STANDALONE = {'status': 'standalone-not-ledger-checked', 'ledger_checked': False,
@@ -314,7 +349,7 @@ def _build_cohort(path, parent, size, rule, cid, out_root, target, ledger) -> No
             write(b'\n]\n')
         manifest = {'format': COHORT_FORMAT, 'selector': SELECTOR, 'parser_version': PARSER_VERSION, 'cohort_id': cid, 'size': size, 'rule': rule,
                     'parent': parent, 'parent_records': picked['parent_records'], 'eligible_records': picked['eligible'],
-                    'excluded_by_reason': picked['excluded'], 'payload': {'file': 'payload.json', 'bytes': offset, 'sha256': sha.hexdigest()},
+                    'excluded_by_reason': picked['excluded'], 'excluded_records': picked['excluded_records'], 'payload': {'file': 'payload.json', 'bytes': offset, 'sha256': sha.hexdigest()},
                     'records': members, 'created_at': datetime.now(timezone.utc).isoformat(),
                     'provenance': 'payload elements are byte-identical parent slices; parent bytes are authoritative',
                     'rights': parent.get('rights')}
@@ -409,7 +444,7 @@ def _verify_cohort_content(directory: Path, parent_path: Path | None = None) -> 
     manifest = json.loads((directory/'manifest.json').read_text())
     body = {k: v for k, v in manifest.items() if k != 'manifest_sha256'}
     if digest(canonical(body).encode()) != manifest.get('manifest_sha256'): raise ValueError('cohort manifest integrity failure')
-    if manifest['cohort_id'] != cohort_identity(manifest['parent'], manifest['rule'], manifest['size']): raise ValueError('cohort identity mismatch')
+    if manifest['cohort_id'] != cohort_identity(manifest['parent'], manifest['rule'], manifest['size'], manifest.get('format')): raise ValueError('cohort identity mismatch')
     payload = (directory/'payload.json').read_bytes()
     if digest(payload) != manifest['payload']['sha256'] or len(payload) != manifest['payload']['bytes']: raise ValueError('cohort payload integrity failure')
     parent = Path(parent_path).open('rb') if parent_path else None
@@ -420,6 +455,12 @@ def _verify_cohort_content(directory: Path, parent_path: Path | None = None) -> 
             if parent is not None:
                 parent.seek(m['parent_start'])
                 if parent.read(m['parent_end'] - m['parent_start']) != raw: raise ValueError('parent slice mismatch: ' + m['source_key'])
+        if manifest['format'] == 'cohort-2':
+            accounting(manifest)
+            if parent is not None:
+                for e in manifest['excluded_records']:
+                    parent.seek(e['parent_start'])
+                    if digest(parent.read(e['parent_end'] - e['parent_start'])) != e['record_sha256']: raise ValueError('excluded parent slice mismatch: ' + str(e['source_key']))
     finally:
         if parent: parent.close()
     if len(json.loads(payload)) != len(manifest['records']): raise ValueError('cohort payload member count mismatch')
@@ -494,6 +535,7 @@ def audit(manifest: dict) -> dict:
         totals['translation_segments'] += r['translations']['segments']
     return {'cohort_id': manifest['cohort_id'], 'publication': manifest.get('publication'), 'parent_sha256': manifest['parent']['sha256'], 'size': n, 'rule': manifest['rule'],
             'parent_records': manifest['parent_records'], 'eligible_records': manifest['eligible_records'], 'excluded_by_reason': manifest['excluded_by_reason'],
+            'accounting': accounting(manifest),
             'field_coverage': {'cdli_number': frac(lambda r: r['cdli']), 'period': frac(lambda r: r['period'] not in (None, 'None')), 'genre': frac(lambda r: r['genre']),
                                'publication': frac(lambda r: r['publication_present']), 'oracc_project_field': frac(lambda r: r['oracc_project_field']),
                                'translation_lines': frac(lambda r: r['translations']['segments']), 'signs_atf_line_count_equal': frac(lambda r: r['line_count_equal'])},

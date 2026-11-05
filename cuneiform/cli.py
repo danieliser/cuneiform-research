@@ -16,6 +16,8 @@ def scope_args(p):
 def main() -> None:
     parser=argparse.ArgumentParser(description='Bounded source-preserving cuneiform graph and corpus pilot')
     parser.add_argument('--root',type=Path,default=Path(os.environ.get('CUNEIFORM_STORAGE_ROOT',str(Path.home()/'.local/share/cuneiform-research'))))
+    parser.add_argument('--max-total-gib',type=float,help='explicit task budget for all bytes under --root (default 5 GiB)')
+    parser.add_argument('--reserve-gib',type=float,help='explicit free-space reserve kept on the filesystem (default 10 GiB)')
     sub=parser.add_subparsers(dest='command',required=True)
     for name in ('inspect','import'):
         p=sub.add_parser(name); p.add_argument('source',choices=['ebl','ebl-atf','cdli','oracc']); p.add_argument('path',type=Path)
@@ -27,9 +29,11 @@ def main() -> None:
     p=sub.add_parser('acquire',help='checksum-verified download into the immutable raw store');p.add_argument('url');p.add_argument('--allowlist',type=Path,default=REPO/'sources/allowlist.json');p.add_argument('--max-bytes',type=int,required=True);p.add_argument('--expect-md5');p.add_argument('--expect-sha256');p.add_argument('--expect-bytes',type=int);p.add_argument('--label',default='');p.add_argument('--rights',type=Path,help='JSON rights ledger entry');p.add_argument('--context',default='{}',help='JSON object recorded verbatim');p.add_argument('--chain-intermediate',type=Path,help='one verified intermediate certificate a server omits')
     sub.add_parser('receipts',help='list verified acquisition receipts')
     p=sub.add_parser('corpus-inspect',help='streaming whole-file inspection of an acquired eBL JSON export');p.add_argument('receipt')
-    p=sub.add_parser('corpus-select',help='deterministic cohort extraction with immutable manifest');p.add_argument('receipt');p.add_argument('--size',type=int);p.add_argument('--cdli-from-oracc',help='ORACC export receipt: keep only exact cdliNumber matches with its corpus');p.add_argument('--project')
+    p=sub.add_parser('corpus-select',help='deterministic cohort extraction with immutable manifest');p.add_argument('receipt');p.add_argument('--size',type=int);p.add_argument('--all-eligible',action='store_true',help='every eligible record of the parent (size=None), with per-record exclusion accounting');p.add_argument('--cdli-from-oracc',help='ORACC export receipt: keep only exact cdliNumber matches with its corpus');p.add_argument('--project')
     p=sub.add_parser('corpus-audit',help='per-record feasibility audit for a cohort');p.add_argument('cohort');p.add_argument('--markdown',action='store_true')
+    p=sub.add_parser('corpus-accounting',help='exhaustive parent-record accounting of a cohort (members + excluded records with reasons)');p.add_argument('cohort')
     p=sub.add_parser('corpus-import',help='chunked import of a cohort into an immutable snapshot');p.add_argument('cohort');p.add_argument('--batch',type=int,default=200)
+    p.add_argument('--projections',choices=['corpus','full'],default='corpus',help='projection ceiling preset (part of the snapshot ID)');p.add_argument('--memory',default='1GB',help='DuckDB memory limit for the build (no spill)')
     sub.add_parser('snapshots',help='list and verify persisted snapshots (ledger-checked)')
     p=sub.add_parser('publication-status',help='ledger state, open reservations and leftover stages (read-only)');p.add_argument('snapshot',nargs='?')
     p=sub.add_parser('publication-recover',help='resolve an interrupted reservation; never publishes bytes other than the reserved ones');p.add_argument('snapshot');p.add_argument('--action',choices=['inspect','commit','complete','discard','abandon'],default='inspect');p.add_argument('--reason',default='')
@@ -50,7 +54,11 @@ def main() -> None:
     p=sub.add_parser('cdli-import',help='bounded CDLI artifact JSON for exact P-numbers claimed in a snapshot');p.add_argument('--from-snapshot',required=True);p.add_argument('--allowlist',type=Path,required=True);p.add_argument('--max-records',type=int,default=100)
     p=sub.add_parser('oracc-inspect',help='inspect an acquired ORACC project JSON export');p.add_argument('receipt')
     p=sub.add_parser('oracc-import',help='import selected texts of an acquired ORACC project export');p.add_argument('receipt');p.add_argument('--project',required=True);p.add_argument('--text',action='append',default=[]);p.add_argument('--texts-from-snapshot',help='select project texts whose P-number matches cdli alias claims in this snapshot');p.add_argument('--max-texts',type=int,default=100)
-    args=parser.parse_args();cfg=Config(args.root.expanduser().resolve())
+    args=parser.parse_args()
+    budget={}
+    if args.max_total_gib is not None: budget['max_total_bytes']=int(args.max_total_gib*1024**3)
+    if args.reserve_gib is not None: budget['reserve_bytes']=int(args.reserve_gib*1024**3)
+    cfg=Config(args.root.expanduser().resolve(),**budget)
     try:
         result=dispatch(args,cfg)
         if isinstance(result,str): print(result,end='')
@@ -83,7 +91,8 @@ def dispatch(args, cfg):
         return {k:report[k] for k in report if k not in ('key_types',)}
     if c=='corpus-select':
         from .corpus import select_cohort, oracc_filtered_rule, RULE_DEFAULT
-        if args.size is None and not args.cdli_from_oracc: raise ValueError('--size required unless an exact key filter is given')
+        if args.all_eligible and (args.size is not None or args.cdli_from_oracc): raise ValueError('--all-eligible excludes --size and key filters')
+        if args.size is None and not args.cdli_from_oracc and not args.all_eligible: raise ValueError('--size required unless --all-eligible or an exact key filter is given')
         rule=oracc_filtered_rule(cfg.root,args.cdli_from_oracc,args.project) if args.cdli_from_oracc else RULE_DEFAULT
         m=select_cohort(cfg.root,args.receipt,args.size,rule)
         return {k:m[k] for k in ('cohort_id','directory','size','parent_records','eligible_records','excluded_by_reason','payload','rule','verified_parent_slices')}
@@ -91,6 +100,14 @@ def dispatch(args, cfg):
         from .corpus import audit, audit_markdown, cohort_path, verify_cohort
         report=audit(verify_cohort(cohort_path(cfg.root,args.cohort),ledger='store'))
         return audit_markdown(report) if args.markdown else report
+    if c=='corpus-accounting':
+        from .corpus import accounting, cohort_path, verify_cohort
+        from .acquire import raw_path
+        directory=cohort_path(cfg.root,args.cohort)
+        declared=json.loads((directory/'manifest.json').read_text())
+        parent=raw_path(cfg.root,declared['parent']['sha256'])
+        m=verify_cohort(directory,parent if parent.exists() else None,ledger='store')
+        return dict(accounting(m),cohort_id=m['cohort_id'],verified_parent_slices=m['verified_parent_slices'],publication=m['publication'])
     if c=='corpus-import':
         from .corpus import cohort_path, raise_missing_cohort
         from .acquire import raw_path
@@ -98,7 +115,8 @@ def dispatch(args, cfg):
         directory=cohort_path(cfg.root,args.cohort)
         if not os.path.lexists(directory/'manifest.json'): raise_missing_cohort(directory)
         parent=json.loads((directory/'manifest.json').read_text())['parent']
-        r=import_cohort(directory,cfg,parent_path=raw_path(cfg.root,parent['sha256']),batch=args.batch,cohort_ledger='store')
+        from .storage import PROJECTION_PRESETS
+        r=import_cohort(directory,cfg,PROJECTION_PRESETS[args.projections],parent_path=raw_path(cfg.root,parent['sha256']),batch=args.batch,memory=args.memory,cohort_ledger='store')
         m=r['manifest']
         return {'snapshot':r['snapshot'],'reused':r['reused'],'counts':m['counts'],'ingestion':m.get('ingestion'),'build_timings':m.get('build_timings'),'snapshot_payload_bytes':m.get('snapshot_payload_bytes')}
     if c=='snapshots':

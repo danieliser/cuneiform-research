@@ -58,6 +58,20 @@ def scope(path: Path, manifest: dict | None=None) -> dict:
                      'parent': {k: p.get(k) for k in ('sha256', 'md5', 'bytes', 'url', 'receipt_id', 'label', 'acquired_at')}, 'provenance': c['provenance'],
                      'label': f"COHORT {size}/{c['eligible_records']:,} eligible of {c['parent_records']:,}",
                      'scope_note': f"Counts are within a {size}-record cohort selected by rule {c['rule']['name']} (ordered by {c['rule']['order']}) from {c['eligible_records']:,} eligible of {c['parent_records']:,} parent records. They are not corpus frequencies."})
+        if c['size'] is None and c['rule'].get('cdli_in') is None:
+            # All-eligible cohort of one fixed release: the population is the whole eligible release, still parser-bounded.
+            from .corpus import accounting
+            acc = accounting(c)
+            release = p.get('label') or p.get('url') or p['sha256']
+            excluded = c['parent_records'] - c['eligible_records']
+            reasons = '; '.join(f'{k}: {v:,}' for k, v in c['excluded_by_reason'].items())
+            base.update({'kind': 'all eligible records of a fixed release', 'accounting': acc,
+                         'release': {'label': p.get('label'), 'url': p.get('url'), 'sha256': p['sha256'], 'md5': p.get('md5'), 'bytes': p.get('bytes'), 'receipt_id': p.get('receipt_id')},
+                         'label': f"FULL ELIGIBLE {size:,}/{c['parent_records']:,} · {release}",
+                         'scope_note': (f"Counts cover every record of the fixed release {release} (sha256 {p['sha256'][:12]}…) that is eligible under rule {c['rule']['name']}: "
+                                        f"{size:,} of {c['parent_records']:,} parent records; {excluded:,} excluded ({reasons}). Parsing is conservative ({c['parser_version']}): "
+                                        "unsupported grammar is kept as blocking positions, so counts are frequencies of represented positions within this conservative parse of "
+                                        "eligible records. They are not linguistic completeness, and they exclude ineligible records and every other release or corpus.")})
     elif src in ('oracc-selection', 'cdli-selection'):
         sel = json.loads((path/'selection.json').read_text())
         n = len(sel['members']) - (2 if src == 'oracc-selection' else 0)
