@@ -35,6 +35,13 @@ from test_publication import cli, run_child, unlock   # noqa: E402
 
 FIX = ROOT/'fixtures/ebl-synthetic.json'
 RUNTIME = Path.home()/'.local/share/cuneiform-research'
+
+
+def admission_config():
+    """Runtime-root admission for disk tests: the default task budget, unless CUNEIFORM_TEST_MAX_TOTAL_GIB names an explicit
+    larger budget the owner authorized for this root (Q-023: 41 GiB, after the full eBL import). Never lowers the reserve."""
+    gib = os.environ.get('CUNEIFORM_TEST_MAX_TOTAL_GIB')
+    return Config(RUNTIME, max_total_bytes=int(float(gib) * 1024**3)) if gib else Config(RUNTIME)
 DISK = os.environ.get('CUNEIFORM_RUN_DISK_TESTS') == '1'
 
 COHORT_CHILD = """
@@ -71,7 +78,7 @@ def make_link(link: Path, target: Path):
 @unittest.skipUnless(DISK, 'disk verification explicitly gated')
 class StoreReadTests(unittest.TestCase):
     def setUp(self):
-        Config(RUNTIME).guard(256*MiB)
+        admission_config().guard(256*MiB)
         self.tmp = tempfile.TemporaryDirectory(prefix='store-read-test-', dir=RUNTIME/'scratch')
         self.base = Path(self.tmp.name)
 
@@ -281,7 +288,7 @@ print(json.dumps({'reused': r['reused'], 'raced': r.get('raced', False), 'manife
 @unittest.skipUnless(DISK, 'disk verification explicitly gated')
 class CohortPublicationTests(unittest.TestCase):
     def setUp(self):
-        Config(RUNTIME).guard(256*MiB)
+        admission_config().guard(256*MiB)
         self.tmp = tempfile.TemporaryDirectory(prefix='cohort-pub-test-', dir=RUNTIME/'scratch')
         self.base = Path(self.tmp.name)
         rows = json.loads(FIX.read_text()); rows = rows['fragments'] if isinstance(rows, dict) else rows

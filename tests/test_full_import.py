@@ -19,6 +19,13 @@ from cuneiform.storage import FULL_PROJECTIONS, Config, MiB
 from tests.test_corpus_pilot import ROOT, RUNTIME, DISK, write_parent
 
 
+def admission_config():
+    """Runtime-root admission for disk tests: the default task budget, unless CUNEIFORM_TEST_MAX_TOTAL_GIB names an explicit
+    larger budget the owner authorized for this root (Q-023: 41 GiB, after the full eBL import). Never lowers the reserve."""
+    gib = os.environ.get('CUNEIFORM_TEST_MAX_TOTAL_GIB')
+    return Config(RUNTIME, max_total_bytes=int(float(gib) * 1024**3)) if gib else Config(RUNTIME)
+
+
 def manifest(members, excluded, parent_records, size=None, eligible=None):
     reasons = {}
     for e in excluded: reasons[e['reason']] = reasons.get(e['reason'], 0) + 1
@@ -91,7 +98,7 @@ class BoundedLookupTests(unittest.TestCase):
 @unittest.skipUnless(DISK, 'disk verification explicitly gated')
 class FullImportDiskTests(unittest.TestCase):
     def setUp(self):
-        Config(RUNTIME).guard(256*MiB)
+        admission_config().guard(256*MiB)
         self.tmp = tempfile.TemporaryDirectory(prefix='q023-test-', dir=RUNTIME/'scratch' if (RUNTIME/'scratch').exists() else RUNTIME)
         self.base = Path(self.tmp.name)
 

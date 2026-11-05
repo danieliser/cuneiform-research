@@ -15,7 +15,9 @@ ROOT=Path(__file__).resolve().parents[1]
 class DiskDeliveryTests(unittest.TestCase):
     def test_snapshot_idempotence_relocation_parquet_and_tamper(self):
         base=Path.home()/'.local/share/cuneiform-research'
-        Config(base).guard(64*MiB)
+        # Default task budget unless CUNEIFORM_TEST_MAX_TOTAL_GIB names an explicit authorized one (Q-023: 41 GiB).
+        gib=os.environ.get('CUNEIFORM_TEST_MAX_TOTAL_GIB')
+        (Config(base,max_total_bytes=int(float(gib)*1024**3)) if gib else Config(base)).guard(64*MiB)
         # Only this test-owned tree is removed; never unrelated runtime data.
         with tempfile.TemporaryDirectory(prefix='disk-test-',dir=base) as directory:
             root=Path(directory)

@@ -23,6 +23,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 FIX = ROOT/'fixtures/ebl-synthetic.json'
 RUNTIME = Path.home()/'.local/share/cuneiform-research'
+
+
+def admission_config():
+    """Runtime-root admission for disk tests: the default task budget, unless CUNEIFORM_TEST_MAX_TOTAL_GIB names an explicit
+    larger budget the owner authorized for this root (Q-023: 41 GiB, after the full eBL import). Never lowers the reserve."""
+    gib = os.environ.get('CUNEIFORM_TEST_MAX_TOTAL_GIB')
+    return Config(RUNTIME, max_total_bytes=int(float(gib) * 1024**3)) if gib else Config(RUNTIME)
 DISK = os.environ.get('CUNEIFORM_RUN_DISK_TESTS') == '1'
 CHILD = """
 import json, sys
@@ -139,7 +146,7 @@ class OraccProvenanceTests(unittest.TestCase):
 @unittest.skipUnless(DISK, 'disk verification explicitly gated')
 class PublicationDiskTests(unittest.TestCase):
     def setUp(self):
-        Config(RUNTIME).guard(256*MiB)
+        admission_config().guard(256*MiB)
         self.tmp = tempfile.TemporaryDirectory(prefix='publication-test-', dir=RUNTIME/'scratch')
         self.base = Path(self.tmp.name)
 

@@ -18,6 +18,13 @@ from cuneiform.storage import Config, MiB, validate_graph
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = Path.home()/'.local/share/cuneiform-research'
+
+
+def admission_config():
+    """Runtime-root admission for disk tests: the default task budget, unless CUNEIFORM_TEST_MAX_TOTAL_GIB names an explicit
+    larger budget the owner authorized for this root (Q-023: 41 GiB, after the full eBL import). Never lowers the reserve."""
+    gib = os.environ.get('CUNEIFORM_TEST_MAX_TOTAL_GIB')
+    return Config(RUNTIME, max_total_bytes=int(float(gib) * 1024**3)) if gib else Config(RUNTIME)
 DISK = os.environ.get('CUNEIFORM_RUN_DISK_TESTS') == '1'
 PARENT_SHA = '4e970d8713315ca9559fb9dfd79956d5b19b1debb9941c22f8bed0339745d753'
 SNAPSHOTS = {'ebl30': 'snapshot:ce127437339109285185a534145edf50', 'ebl300': 'snapshot:84971360d212834e0b7acbeac1e56abe',
@@ -158,7 +165,7 @@ class CdliMappingTests(unittest.TestCase):
 @unittest.skipUnless(DISK, 'disk verification explicitly gated')
 class CorpusDiskTests(unittest.TestCase):
     def setUp(self):
-        Config(RUNTIME).guard(256*MiB)
+        admission_config().guard(256*MiB)
         self.tmp = tempfile.TemporaryDirectory(prefix='pilot-test-', dir=RUNTIME/'scratch' if (RUNTIME/'scratch').exists() else RUNTIME)
         self.base = Path(self.tmp.name)
 
