@@ -15,7 +15,7 @@ import os
 import re
 from typing import Any, Iterator
 from .adapters import Builder, ingest_record
-from .model import PARSER_VERSION, canonical, digest, identity
+from .model import PARSER_VERSION, READABLE_PARSER_VERSIONS, canonical, digest, identity
 
 SCANNER = 'json-array-stream-1'
 INSPECTOR = 'ebl-inspect-1'
@@ -249,9 +249,11 @@ def select(path: Path, parent: dict, size: int, rule: dict = RULE_DEFAULT) -> di
             'excluded_records': excluded_records}
 
 
-def cohort_identity(parent: dict, rule: dict, size: int | None, fmt: str = COHORT_FORMAT) -> str:
+def cohort_identity(parent: dict, rule: dict, size: int | None, fmt: str = COHORT_FORMAT, parser: str = PARSER_VERSION) -> str:
+    """New cohorts use PARSER_VERSION; verification passes the recorded version of a published (possibly superseded) cohort."""
     if fmt not in COHORT_FORMATS: raise ValueError('unsupported cohort format')
-    return identity('cohort', fmt, SELECTOR, PARSER_VERSION, parent['sha256'], rule, size)
+    if parser not in READABLE_PARSER_VERSIONS: raise ValueError('unsupported cohort parser version')
+    return identity('cohort', fmt, SELECTOR, parser, parent['sha256'], rule, size)
 
 
 def accounting(manifest: dict) -> dict:
@@ -444,7 +446,7 @@ def _verify_cohort_content(directory: Path, parent_path: Path | None = None) -> 
     manifest = json.loads((directory/'manifest.json').read_text())
     body = {k: v for k, v in manifest.items() if k != 'manifest_sha256'}
     if digest(canonical(body).encode()) != manifest.get('manifest_sha256'): raise ValueError('cohort manifest integrity failure')
-    if manifest['cohort_id'] != cohort_identity(manifest['parent'], manifest['rule'], manifest['size'], manifest.get('format')): raise ValueError('cohort identity mismatch')
+    if manifest['cohort_id'] != cohort_identity(manifest['parent'], manifest['rule'], manifest['size'], manifest.get('format'), manifest.get('parser_version')): raise ValueError('cohort identity mismatch')
     payload = (directory/'payload.json').read_bytes()
     if digest(payload) != manifest['payload']['sha256'] or len(payload) != manifest['payload']['bytes']: raise ValueError('cohort payload integrity failure')
     parent = Path(parent_path).open('rb') if parent_path else None

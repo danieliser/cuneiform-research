@@ -16,6 +16,31 @@ RIGHTS['ebl-cohort'] = RIGHTS['ebl']
 
 IGNORE_CONFLICTS = {'witness', 'sign_type'}
 
+# conservative-4 ATF line gate (eBL-ATF grammar, docs/PARSER-REVISIONS.md). A text line is `line-number. text`; a line
+# starting with '#' (translation, note, comment), '$' (state), '&' or '@' (structure) is never a text line, and a label
+# outside eBL's line-number grammar is excluded rather than guessed. conservative-3 accepted any first run ending in '.'
+# and so stored 129 `#tr…`/`#note`/`#Vgl` lines of the eBL release as text lines.
+TEXT_LINE = re.compile(r"([^\s]+)\.\s+(.*)")
+_SINGLE_LINE_NUMBER = r"(?:[A-Za-z]\+)?\d+['′’]?[A-Za-z]?"
+LINE_NUMBER = re.compile(rf"{_SINGLE_LINE_NUMBER}(?:-{_SINGLE_LINE_NUMBER})?")
+NON_TEXT_PREFIXES = ('#', '$', '&', '@')
+# @-line classes (eBL-ATF `at-line`). Only a surface sets the surface; an object or seal starts a new carrier whose
+# surface is not stated; discourse, heading and division markers are document structure inside the current surface
+# and column. Any other @-line (e.g. `@end of column`) leaves the surface and column unknown. The raw @-line itself is
+# kept in the record and accounted as a non-token exclusion; it is never copied into `line.surface`.
+_STATUS = r"\s*[!?'*]*"
+SURFACE_MARKER = re.compile(rf"(?:obverse|reverse|left|right|top|bottom|edge(?: [a-z])?|face \S+|surface .+){_STATUS}")
+OBJECT_MARKER = re.compile(rf"(?:tablet|envelope|prism|bulla|fragment .+|object .+|seal \d+){_STATUS}")
+STRUCTURE_MARKER = re.compile(rf"(?:catchline|colophon|date|signatures?|summary|witnesses|h\d+(?: .*)?|m=division .+){_STATUS}")
+
+
+def at_line_state(body: str, surface: str | None, column: str | None) -> tuple[str | None, str | None]:
+    """(surface, column) after the @-line `@<body>`."""
+    if body.startswith('column '): return surface, body[7:]
+    if SURFACE_MARKER.fullmatch(body): return body, None
+    if STRUCTURE_MARKER.fullmatch(body): return surface, column
+    return None, None   # object, seal or unrecognized marker: the surface is not stated
+
 
 class Builder:
     """Collects one source record at a time; commit/discard keep rejected records free of partial rows.
@@ -101,9 +126,12 @@ class Builder:
         _,sid=self.sequence(record,artifact,field,'source-derived-sign-list' if derived else 'editorial-transliteration')
         offset=0; previous_line=None; ordinal=0; surface=None; column=None
         for source_line_no, rawline in enumerate(text.splitlines(keepends=True)):
-            line=rawline.rstrip('\r\n'); match=re.match(r"([^\s]+)\.\s+(.*)",line)
-            if line.startswith('@column '): column=line[8:]
-            elif line.startswith('@'): surface=line[1:]; column=None
+            line=rawline.rstrip('\r\n')
+            match=None if derived or line.startswith(NON_TEXT_PREFIXES) else TEXT_LINE.match(line)
+            if line.startswith('@'): surface,column=at_line_state(line[1:],surface,column)
+            if match and not LINE_NUMBER.fullmatch(match[1]):
+                self.exclude(record,f'{field}:line:{source_line_no}','ATF line label outside eBL line-number grammar retained in raw')
+                offset+=len(rawline.encode()); continue
             if line.startswith('#tr.'):
                 tm=re.match(r'#tr\.([a-z-]+)(?:\.\([^)]*\))?:\s*(.*)',line)
                 if tm:

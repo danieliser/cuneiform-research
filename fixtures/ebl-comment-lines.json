@@ -1,0 +1,13 @@
+[
+ {
+  "_id": "FIX.1",
+  "atf": "@obverse\n1. ina he\n#tr.en.(b.e. 1): There will never be any lawsuit.\n#tr.en. Urama;\n#tr. en: A quarter (mina) of silver\n#tr.ar. خدمة\n#tr.en:. .. Nunamnir(?) ...\n#note. Gloss between signs.\n#Vgl. KADP 33 Vs. 6-7\n2. i-na KUR\n@colophon\n3. DUB ša\n#tr.en: tablet of he\n$ (rest broken)\n&P123456 = X 1\n#note: a normal note. With a sentence.\n@column 2\n@date\n4'. a+na\n@seal 1\n5. KIŠIB\n@reverse?\na+1. I ina\n1a. ša\n2-3. he\n4′. x\n@end of column\n6. ina",
+  "signs": "ABZ1 ABZ2\nABZ3\nABZ4 ABZ5\nABZ6\nABZ7\nABZ8 ABZ1\nABZ9\nABZ10\nX\nABZ1\n",
+  "externalNumbers": {}
+ },
+ {
+  "_id": "FIX.2",
+  "atf": "@obverse\n1. ina\nb. not-a-line-number\n1.2. odd\n#tr.en: in\n",
+  "externalNumbers": {}
+ }
+]

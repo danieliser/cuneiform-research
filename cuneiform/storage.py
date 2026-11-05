@@ -13,7 +13,7 @@ import uuid
 import duckdb
 from .adapters import Builder, RIGHTS, ingest, records
 from .projections import ProjectionConfig, REVISION, assert_fresh, build as build_projections
-from .model import SCHEMA_VERSION, PARSER_VERSION, canonical, digest, identity
+from .model import SCHEMA_VERSION, PARSER_VERSION, READABLE_PARSER_VERSIONS, canonical, digest, identity
 
 MiB=1024**2
 SELECTION_SOURCES={'oracc-selection','cdli-selection'}
@@ -161,7 +161,7 @@ def verify(snapshot: Path, expected_sid: str | None=None, *, ledger: str='auto')
     unsigned={k:v for k,v in manifest.items() if k!='manifest_sha256'}
     if digest(canonical(unsigned).encode())!=manifest['manifest_sha256']: raise ValueError('manifest integrity failure')
     legacy=manifest['schema_version']=='1'
-    if manifest['parser_version']!=('conservative-2' if legacy else PARSER_VERSION): raise ValueError('unsupported parser version')
+    if manifest['parser_version'] not in (('conservative-2',) if legacy else READABLE_PARSER_VERSIONS): raise ValueError('unsupported parser version')
     parts=[manifest['namespace'],manifest['source'],manifest['raw_sha256'],manifest['schema_version'],manifest['parser_version'],manifest['record_id'],manifest['source_url']]
     projection_config=None
     if not legacy:

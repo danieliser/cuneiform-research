@@ -5,7 +5,11 @@ import hashlib
 import json
 
 SCHEMA_VERSION = '2'
-PARSER_VERSION = 'conservative-3'
+PARSER_VERSION = 'conservative-4'
+# Parser versions whose published schema-2 snapshots and cohorts this code still verifies and reads (never rebuilds).
+# conservative-3 is superseded: it stored 129 `#`-comment lines as text lines and @-structure markers as surfaces
+# (docs/PARSER-REVISIONS.md). Its snapshots stay readable for provenance; new builds use PARSER_VERSION.
+READABLE_PARSER_VERSIONS = ('conservative-3', PARSER_VERSION)
 
 class NodeKind(StrEnum):
     ARTIFACT = 'Artifact'
