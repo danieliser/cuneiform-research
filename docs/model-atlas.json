@@ -1,6 +1,6 @@
 {
   "atlas_schema": "cuneiform-model-atlas/1",
-  "atlas_revision": 6,
+  "atlas_revision": 7,
   "updated": "2026-11-05",
   "baseline_commit": "057a0b7",
   "canonical_rule": "docs/model-atlas.json is the single canonical machine model. docs/MODEL-ATLAS.md (generated block) and docs/model-atlas.html (embedded data block) are regenerated from it by scripts/check_model_atlas.py --write and drift-checked by --check. Code is the authority for what is implemented; the checker fails when the atlas and code disagree.",
@@ -4997,7 +4997,7 @@
       "kind": "interface",
       "domain": "interfaces",
       "label": "Research UI (sibling cuneiform-ui)",
-      "summary": "Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui at 4dcc416, pinned to backend 057a0b7 (Q-023 independently accepted by reviews/full-corpus-review-v0.1.md; pilot pin was 63f4221), with an isolated, authenticated FalkorDB behind bounded query templates. Serves the full eligible eBL snapshot with a labelled bounded per-request check. Not end-to-end SPEC.",
+      "summary": "Local read-only Cuneiform Workbench in the sibling repository cuneiform-ui at 19c86b0, pinned to backend 057a0b7 (Q-023 independently accepted by reviews/full-corpus-review-v0.1.md; pilot pin was 63f4221), with an isolated, authenticated FalkorDB behind bounded query templates. Default view: four declarative research questions (Q-024) answered over every match of the full eligible eBL snapshot; the motif query, graph, coverage and FalkorDB views remain. Not end-to-end SPEC.",
       "status": {
         "modeled": "documented",
         "implemented": "code",
@@ -5007,8 +5007,8 @@
       "implementation": {
         "external": {
           "repo": "../cuneiform-ui",
-          "commit": "4dcc416",
-          "observed": "Q-023 writer (UNVERIFIED, not independent): sibling commits 2be365e and 4dcc416 pin backend 057a0b7 (PIN_COMMIT and TESTED_COMMITS; 63f4221 kept as the rollback pin). Live on 127.0.0.1:8740: 7/7 snapshots ready; snapshot:965aa262... served with the bounded per-request check (stat fingerprint, manifest bytes, ledger; full payload re-hash at discovery and hourly), index motifs ABZ480 ABZ13 = 7,170, ina ? ana = 359, DIS ina = 4,657 with graph parity, parent byte trace verified; stale 409, foreign Host 421, Cypher 403, FalkorDB load of the full snapshot refused (5.3M nodes > 150k cap). UI suite 44 tests OK with 24 isolation checks ok. Evidence: scratch/q023-full-import/evidence/live-check-4dcc416.json.",
+          "commit": "19c86b0",
+          "observed": "Q-024 builder (UNVERIFIED, not independent): sibling commit 19c86b0 adds server/questions.py (GET /api/questions registry, POST /api/ask, /api/suggest, /api/tablets, /api/passage) reading table:posting, table:ngram, view:token_context, occurrence, line, artifact metadata and translation_segment with fixed parameterized SQL inside the existing bounded run (10 s, 512 MB, per-request integrity check, version binding, 409 when stale); no backend change, pin still 057a0b7. Live on 127.0.0.1:8740 (pid 26814): DIS ina 4,657 matches / 698 tablets / 4,530 lines; ina _ KUR 248 matches, 72 fillers; usage ina 44,334 with before 41,271 + line start 3,063; all 18 checked aggregates equal an independent lead/lag recomputation from canonical occurrence rows. UI suite 55 OK (0 skipped) with 24 isolation checks ok. Earlier (Q-023 writer, 4dcc416): 7/7 snapshots ready, index motifs with graph parity, parent byte trace verified; stale 409, foreign Host 421, Cypher 403; FalkorDB load of the full snapshot refused (5.3M nodes > 150k cap).",
           "review": "Accepted for the local read-only pilot by the integration review (reviews/pilot-integration-review-v0.1.md, committed in 2d746f7; Q-008), which also closed the Q-006 follow-ups (N-1 to N-7 and the re-pin to 63f4221). Earlier: re-review 05cfcd7b (sibling reviews/ui-review-v0.2.md) at ca4b514. Acceptance rule for later runs: 42 OK with 0 skipped, because low-disk fixture imports skip rather than fail (review §8, P1). The UI suite runs in the sibling, so it is not a verification_runs entry here (code_ref must resolve in this repository); verified stays none. Q-023 re-pin to 057a0b7 is writer-tested only; an independent reviewer must accept it before it counts as accepted."
         }
       },
@@ -5022,7 +5022,8 @@
         "Q-002",
         "Q-006",
         "Q-008",
-        "Q-023"
+        "Q-023",
+        "Q-024"
       ]
     }
   ],
